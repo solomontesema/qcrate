@@ -1,0 +1,17 @@
+*.jou
+*.log
+*.str
+.Xil/
+.cache/
+.gen/
+.hw/
+.ip_user_files/
+.sim/
+.runs/
+.sdk/
+*.xpr
+*.bit
+*.bin
+*.xsa
+*.ltx
+__pycache__/
