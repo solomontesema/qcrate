@@ -15,3 +15,5 @@
 *.xsa
 *.ltx
 __pycache__/
+
+build/*
