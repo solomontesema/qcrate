@@ -5,25 +5,32 @@ module qcrate_apb_fabric #(
     parameter int APB_ADDR_WIDTH = 32,
     parameter int APB_DATA_WIDTH = 32
 ) (
-    input  logic                         pclk_i,
-    input  logic                         presetn_i,
+    input  wire logic                    pclk_i,
+    input  wire logic                    presetn_i,
 
-    input  logic [APB_ADDR_WIDTH-1:0]    paddr_i,
-    input  logic                         psel_i,
-    input  logic                         penable_i,
-    input  logic                         pwrite_i,
-    input  logic [APB_DATA_WIDTH-1:0]    pwdata_i,
+    // The fabric decodes only the 4 KiB page bits; lower bits belong to slaves.
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  wire logic [APB_ADDR_WIDTH-1:0]
+                                         paddr_i,
+    /* verilator lint_on UNUSEDSIGNAL */
+    input  wire logic                    psel_i,
+    input  wire logic                    penable_i,
+    input  wire logic                    pwrite_i,
+    input  wire logic [APB_DATA_WIDTH-1:0]
+                                         pwdata_i,
 
     output logic                         sys_psel_o,
     output logic                         stream_psel_o,
 
-    input  logic [APB_DATA_WIDTH-1:0]    sys_prdata_i,
-    input  logic                         sys_pready_i,
-    input  logic                         sys_pslverr_i,
+    input  wire logic [APB_DATA_WIDTH-1:0]
+                                         sys_prdata_i,
+    input  wire logic                    sys_pready_i,
+    input  wire logic                    sys_pslverr_i,
 
-    input  logic [APB_DATA_WIDTH-1:0]    stream_prdata_i,
-    input  logic                         stream_pready_i,
-    input  logic                         stream_pslverr_i,
+    input  wire logic [APB_DATA_WIDTH-1:0]
+                                         stream_prdata_i,
+    input  wire logic                    stream_pready_i,
+    input  wire logic                    stream_pslverr_i,
 
     output logic [APB_DATA_WIDTH-1:0]    prdata_o,
     output logic                         pready_o,

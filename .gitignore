@@ -1,5 +1,6 @@
 *.jou
 *.log
+*.pb
 *.str
 .Xil/
 .cache/
@@ -9,6 +10,7 @@
 .sim/
 .runs/
 .sdk/
+xsim.dir/
 *.xpr
 *.bit
 *.bin

@@ -29,33 +29,36 @@ module qcrate_top(
   logic              pl_clk0;
   logic              pl_clk1;
   logic              qcrate_irq;
-   // BD instantiation
-   design_1 design_1_i (
-        .APB_M_0_paddr(APB_M_0_paddr),
-        .APB_M_0_penable(APB_M_0_penable),
-        .APB_M_0_prdata(APB_M_0_prdata),
-        .APB_M_0_pready(APB_M_0_pready),
-        .APB_M_0_psel(APB_M_0_psel),
-        .APB_M_0_pslverr(APB_M_0_pslverr),
-        .APB_M_0_pwdata(APB_M_0_pwdata),
-        .APB_M_0_pwrite(APB_M_0_pwrite),
+
+    // ------------------------------------------------------------
+    // Block design 
+    // ------------------------------------------------------------
+    design_1 design_1_i (
+        .APB_M_0_paddr          (APB_M_0_paddr),
+        .APB_M_0_penable        (APB_M_0_penable),
+        .APB_M_0_prdata         (APB_M_0_prdata),
+        .APB_M_0_pready         (APB_M_0_pready),
+        .APB_M_0_psel           (APB_M_0_psel),
+        .APB_M_0_pslverr        (APB_M_0_pslverr),
+        .APB_M_0_pwdata         (APB_M_0_pwdata),
+        .APB_M_0_pwrite         (APB_M_0_pwrite),
         
-        .S_AXIS_S2MM_0_tdata(S_AXIS_S2MM_0_tdata),
-        .S_AXIS_S2MM_0_tkeep(S_AXIS_S2MM_0_tkeep),
-        .S_AXIS_S2MM_0_tlast(S_AXIS_S2MM_0_tlast),
-        .S_AXIS_S2MM_0_tready(S_AXIS_S2MM_0_tready),
-        .S_AXIS_S2MM_0_tvalid(S_AXIS_S2MM_0_tvalid),
+        .S_AXIS_S2MM_0_tdata    (S_AXIS_S2MM_0_tdata),
+        .S_AXIS_S2MM_0_tkeep    (S_AXIS_S2MM_0_tkeep),
+        .S_AXIS_S2MM_0_tlast    (S_AXIS_S2MM_0_tlast),
+        .S_AXIS_S2MM_0_tready   (S_AXIS_S2MM_0_tready),
+        .S_AXIS_S2MM_0_tvalid   (S_AXIS_S2MM_0_tvalid),
         
-        .pl_arstn0(pl_arstn0),
-        .pl_arstn1(pl_arstn1),
-        .pl_clk0(pl_clk0),    //200Mhz
-        .pl_clk1(pl_clk1),    //100Mhz
-        .user_irq_in(qcrate_irq)
+        .pl_arstn0              (pl_arstn0),
+        .pl_arstn1              (pl_arstn1),
+        .pl_clk0                (pl_clk0),    //200Mhz
+        .pl_clk1                (pl_clk1),    //100Mhz
+        .user_irq_in            (qcrate_irq)
     );
+
     // ------------------------------------------------------------
     // Entire custom Q-Crate application
     // ------------------------------------------------------------
-
     qcrate_core u_qcrate_core (
         .clk_ctrl_i            (pl_clk1), //100Mhz, APB control clock
         .rst_ctrl_n_i          (pl_arstn1), 

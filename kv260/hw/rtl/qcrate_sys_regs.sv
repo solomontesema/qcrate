@@ -8,14 +8,16 @@ module qcrate_sys_regs #(
     parameter logic [31:0] STREAM_CLOCK_HZ  = 32'd200_000_000,
     parameter logic [31:0] CONTROL_CLOCK_HZ = 32'd100_000_000
 ) (
-    input  logic        pclk_i,
-    input  logic        presetn_i,
+    input  wire logic   pclk_i,
+    input  wire logic   presetn_i,
 
-    input  logic [11:0] paddr_i,
-    input  logic        psel_i,
-    input  logic        penable_i,
-    input  logic        pwrite_i,
-    input  logic [31:0] pwdata_i,
+    input  wire logic [11:0]
+                        paddr_i,
+    input  wire logic   psel_i,
+    input  wire logic   penable_i,
+    input  wire logic   pwrite_i,
+    input  wire logic [31:0]
+                        pwdata_i,
 
     output logic [31:0] prdata_o,
     output logic        pready_o,
