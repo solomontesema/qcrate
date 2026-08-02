@@ -248,7 +248,9 @@ module qcrate_core #(
     // Main stream-producing engine
     // ============================================================
 
-    qcrate_stream_engine u_stream_engine (
+    qcrate_stream_engine #(
+        .AXIS_DATA_WIDTH            (AXIS_DATA_WIDTH)
+    ) u_stream_engine (
         .clk_i                      (clk_stream_i),
         .rst_n_i                    (rst_stream_n_i),
 

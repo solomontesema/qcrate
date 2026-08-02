@@ -19,3 +19,4 @@ xsim.dir/
 __pycache__/
 
 build/*
+kv260/hw/vivado/

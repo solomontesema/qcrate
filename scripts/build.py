@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-STAGES = ("project", "synth", "impl", "bitstream", "xsa", "all")
+STAGES = ("project", "synth", "impl", "bitstream", "xsa", "export", "all")
 RTL_SUFFIXES = {".v", ".sv", ".vh", ".svh"}
 
 
@@ -55,6 +55,16 @@ def tq(value: str | Path) -> str:
     if "{" in text or "}" in text:
         die(f"unsupported brace in Tcl value: {text}")
     return "{" + text + "}"
+
+
+def tcl_list_assignment(name: str, values: list[Path]) -> list[str]:
+    if not values:
+        return [f"set {name} [list]"]
+    return [
+        f"set {name} [list \\",
+        *[f"  {tq(path)} \\" for path in values[:-1]],
+        f"  {tq(values[-1])}]",
+    ]
 
 
 def main() -> int:
@@ -111,12 +121,8 @@ def main() -> int:
         f"set cfg_artifact_dir {tq(artifact_dir)}",
         f"set cfg_bd_tcl {tq(bd_tcl)}",
         f"set cfg_jobs {int(cfg['jobs'])}",
-        "set cfg_rtl_files [list",
-        *[f"  {tq(path)}" for path in rtl],
-        "]",
-        "set cfg_xdc_files [list",
-        *[f"  {tq(path)}" for path in xdc],
-        "]",
+        *tcl_list_assignment("cfg_rtl_files", rtl),
+        *tcl_list_assignment("cfg_xdc_files", xdc),
     ]
     manifest.write_text("\n".join(lines) + "\n")
 
