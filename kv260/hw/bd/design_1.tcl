@@ -138,7 +138,7 @@ xilinx.com:ip:proc_sys_reset:5.0\
 xilinx.com:ip:xlconcat:2.1\
 xilinx.com:ip:xlconstant:1.1\
 xilinx.com:ip:axi_apb_bridge:3.0\
-xilinx.com:ip:axi_clock_converter:2.1\
+xilinx.com:ip:system_ila:1.1\
 "
 
    set list_ips_missing ""
@@ -175,6 +175,14 @@ proc create_root_design { parentCell } {
 
   variable script_folder
   variable design_name
+
+  set enable_axi_ila 0
+  if {[info exists ::cfg_verilog_defines]} {
+    if {[lsearch -exact $::cfg_verilog_defines QCRATE_AXI_ILA] >= 0} {
+      set enable_axi_ila 1
+      puts "INFO: enabling Q-Crate AXI System ILA"
+    }
+  }
 
   if { $parentCell eq "" } {
      set parentCell [get_bd_cells /]
@@ -683,7 +691,7 @@ MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 MIO#GPIO0 
     CONFIG.PSU__MAXIGP0__DATA_WIDTH {128} \
     CONFIG.PSU__OVERRIDE__BASIC_CLOCK {1} \
     CONFIG.PSU__PL_CLK0_BUF {TRUE} \
-    CONFIG.PSU__PL_CLK1_BUF {FALSE} \
+    CONFIG.PSU__PL_CLK1_BUF {TRUE} \
     CONFIG.PSU__PMU_COHERENCY {0} \
     CONFIG.PSU__PMU__AIBACK__ENABLE {0} \
     CONFIG.PSU__PMU__EMIO_GPI__ENABLE {0} \
@@ -809,20 +817,24 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
   # Create instance: xlconcat_0, and set properties
   set xlconcat_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 xlconcat_0 ]
 
-  # Create instance: const_1, and set properties
-  set const_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_1 ]
+  # Create instance: const_one, and set properties
+  set const_one [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_one ]
+  set_property CONFIG.CONST_VAL {1} $const_one
 
   # Create instance: proc_sys_reset_1, and set properties
   set proc_sys_reset_1 [ create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 proc_sys_reset_1 ]
 
   # Create instance: axi_apb_bridge_0, and set properties
   set axi_apb_bridge_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_apb_bridge:3.0 axi_apb_bridge_0 ]
-  set_property CONFIG.C_APB_NUM_SLAVES {1} $axi_apb_bridge_0
+  set_property -dict [list \
+    CONFIG.C_APB_NUM_SLAVES {1} \
+    CONFIG.C_DPHASE_TIMEOUT {16} \
+  ] $axi_apb_bridge_0
 
 
-  # Create instance: const_0, and set properties
-  set const_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_0 ]
-  set_property CONFIG.CONST_VAL {0} $const_0
+  # Create instance: const_zero, and set properties
+  set const_zero [ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_zero ]
+  set_property CONFIG.CONST_VAL {0} $const_zero
 
 
   # Create instance: axi_smc, and set properties
@@ -832,24 +844,37 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
     CONFIG.NUM_SI {1} \
   ] $axi_smc
 
-
-  # Create instance: axi_clock_converter_0, and set properties
-  set axi_clock_converter_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:axi_clock_converter:2.1 axi_clock_converter_0 ]
+  # Optional control-path instrumentation for Linux register-access bring-up.
+  if {$enable_axi_ila} {
+    set system_ila_0 [ create_bd_cell -type ip -vlnv xilinx.com:ip:system_ila:1.1 system_ila_0 ]
+    set_property -dict [list \
+      CONFIG.C_DATA_DEPTH {2048} \
+      CONFIG.C_MON_TYPE {MIX} \
+      CONFIG.C_NUM_MONITOR_SLOTS {3} \
+      CONFIG.C_NUM_OF_PROBES {1} \
+      CONFIG.C_PROBE0_WIDTH {1} \
+      CONFIG.C_SLOT_0_AXI_PROTOCOL {AXI4} \
+      CONFIG.C_SLOT_1_AXI_PROTOCOL {AXI4LITE} \
+      CONFIG.C_SLOT_2_AXI_PROTOCOL {AXI4LITE} \
+    ] $system_ila_0
+  }
 
   # Create interface connections
   connect_bd_intf_net -intf_net S_AXIS_S2MM_0_1 [get_bd_intf_ports S_AXIS_S2MM_0] [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
   connect_bd_intf_net -intf_net axi_apb_bridge_0_APB_M [get_bd_intf_ports APB_M_0] [get_bd_intf_pins axi_apb_bridge_0/APB_M]
-  connect_bd_intf_net -intf_net axi_clock_converter_0_M_AXI [get_bd_intf_pins axi_clock_converter_0/M_AXI] [get_bd_intf_pins axi_apb_bridge_0/AXI4_LITE]
   connect_bd_intf_net -intf_net axi_dma_0_M_AXI_S2MM [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins smartconnect_0/S00_AXI]
   connect_bd_intf_net -intf_net axi_smc_M00_AXI [get_bd_intf_pins axi_smc/M00_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
-  connect_bd_intf_net -intf_net axi_smc_M01_AXI [get_bd_intf_pins axi_smc/M01_AXI] [get_bd_intf_pins axi_clock_converter_0/S_AXI]
+  connect_bd_intf_net -intf_net axi_smc_M01_AXI [get_bd_intf_pins axi_smc/M01_AXI] [get_bd_intf_pins axi_apb_bridge_0/AXI4_LITE]
   connect_bd_intf_net -intf_net smartconnect_0_M00_AXI [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP0_FPD] [get_bd_intf_pins smartconnect_0/M00_AXI]
   connect_bd_intf_net -intf_net zynq_ultra_ps_e_0_M_AXI_HPM0_FPD [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM0_FPD] [get_bd_intf_pins axi_smc/S00_AXI]
+  if {$enable_axi_ila} {
+    connect_bd_intf_net -intf_net zynq_ultra_ps_e_0_M_AXI_HPM0_FPD [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM0_FPD] [get_bd_intf_pins system_ila_0/SLOT_0_AXI]
+    connect_bd_intf_net -intf_net axi_smc_M00_AXI [get_bd_intf_pins axi_smc/M00_AXI] [get_bd_intf_pins system_ila_0/SLOT_1_AXI]
+    connect_bd_intf_net -intf_net axi_smc_M01_AXI [get_bd_intf_pins axi_smc/M01_AXI] [get_bd_intf_pins system_ila_0/SLOT_2_AXI]
+  }
 
   # Create port connections
-  connect_bd_net -net Net  [get_bd_pins const_0/dout] \
-  [get_bd_pins proc_sys_reset_1/aux_reset_in] \
-  [get_bd_pins proc_sys_reset_0/aux_reset_in] \
+  connect_bd_net -net const_zero_dout  [get_bd_pins const_zero/dout] \
   [get_bd_pins proc_sys_reset_1/mb_debug_sys_rst] \
   [get_bd_pins proc_sys_reset_0/mb_debug_sys_rst]
   connect_bd_net -net axi_dma_0_s2mm_introut  [get_bd_pins axi_dma_0/s2mm_introut] \
@@ -857,17 +882,18 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
   connect_bd_net -net pl_ps_irq0_0_1  [get_bd_ports user_irq_in] \
   [get_bd_pins xlconcat_0/In0]
   connect_bd_net -net proc_sys_reset_0_peripheral_aresetn  [get_bd_pins proc_sys_reset_0/peripheral_aresetn] \
-  [get_bd_pins axi_dma_0/axi_resetn] \
   [get_bd_ports pl_arstn0] \
-  [get_bd_pins axi_smc/aresetn] \
-  [get_bd_pins axi_clock_converter_0/s_axi_aresetn]
+  [get_bd_pins smartconnect_0/aresetn]
   connect_bd_net -net proc_sys_reset_1_peripheral_aresetn  [get_bd_pins proc_sys_reset_1/peripheral_aresetn] \
   [get_bd_ports pl_arstn1] \
-  [get_bd_pins axi_apb_bridge_0/s_axi_aresetn] \
-  [get_bd_pins axi_clock_converter_0/m_axi_aresetn]
+  [get_bd_pins axi_dma_0/axi_resetn] \
+  [get_bd_pins axi_smc/aresetn] \
+  [get_bd_pins axi_apb_bridge_0/s_axi_aresetn]
   connect_bd_net -net xlconcat_0_dout  [get_bd_pins xlconcat_0/dout] \
   [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
-  connect_bd_net -net xlconstant_0_dout  [get_bd_pins const_1/dout] \
+  connect_bd_net -net const_one_dout  [get_bd_pins const_one/dout] \
+  [get_bd_pins proc_sys_reset_0/aux_reset_in] \
+  [get_bd_pins proc_sys_reset_1/aux_reset_in] \
   [get_bd_pins proc_sys_reset_0/dcm_locked] \
   [get_bd_pins proc_sys_reset_1/dcm_locked]
   connect_bd_net -net zynq_ultra_ps_e_0_pl_clk0  [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] \
@@ -875,28 +901,30 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
   [get_bd_pins smartconnect_0/aclk] \
   [get_bd_pins proc_sys_reset_0/slowest_sync_clk] \
   [get_bd_pins axi_dma_0/m_axi_s2mm_aclk] \
-  [get_bd_pins axi_dma_0/s_axi_lite_aclk] \
-  [get_bd_pins zynq_ultra_ps_e_0/maxihpm0_fpd_aclk] \
-  [get_bd_ports pl_clk0] \
-  [get_bd_pins axi_smc/aclk] \
-  [get_bd_pins axi_clock_converter_0/s_axi_aclk]
+  [get_bd_ports pl_clk0]
   connect_bd_net -net zynq_ultra_ps_e_0_pl_clk1  [get_bd_pins zynq_ultra_ps_e_0/pl_clk1] \
   [get_bd_ports pl_clk1] \
   [get_bd_pins proc_sys_reset_1/slowest_sync_clk] \
-  [get_bd_pins axi_apb_bridge_0/s_axi_aclk] \
-  [get_bd_pins axi_clock_converter_0/m_axi_aclk]
+  [get_bd_pins zynq_ultra_ps_e_0/maxihpm0_fpd_aclk] \
+  [get_bd_pins axi_smc/aclk] \
+  [get_bd_pins axi_dma_0/s_axi_lite_aclk] \
+  [get_bd_pins axi_apb_bridge_0/s_axi_aclk]
   connect_bd_net -net zynq_ultra_ps_e_0_pl_resetn0  [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] \
   [get_bd_pins proc_sys_reset_0/ext_reset_in] \
-  [get_bd_pins proc_sys_reset_1/ext_reset_in] \
-  [get_bd_pins smartconnect_0/aresetn]
+  [get_bd_pins proc_sys_reset_1/ext_reset_in]
+  if {$enable_axi_ila} {
+    connect_bd_net -net zynq_ultra_ps_e_0_pl_clk1 [get_bd_pins zynq_ultra_ps_e_0/pl_clk1] [get_bd_pins system_ila_0/clk]
+    connect_bd_net -net proc_sys_reset_1_peripheral_aresetn [get_bd_pins proc_sys_reset_1/peripheral_aresetn] [get_bd_pins system_ila_0/probe0]
+    connect_bd_net -net const_one_dout [get_bd_pins const_one/dout] [get_bd_pins system_ila_0/resetn]
+  }
 
   # Create address segments
   assign_bd_address -offset 0xA0010000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs APB_M_0/Reg] -force
   assign_bd_address -offset 0xA0000000 -range 0x00010000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs axi_dma_0/S_AXI_LITE/Reg] -force
   assign_bd_address -offset 0x00000000 -range 0x80000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP2/HP0_DDR_LOW] -force
-  assign_bd_address -offset 0xC0000000 -range 0x20000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP2/HP0_QSPI] -force
 
   # Exclude Address Segments
+  exclude_bd_addr_seg -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP2/HP0_QSPI]
   exclude_bd_addr_seg -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP2/HP0_DDR_HIGH]
   exclude_bd_addr_seg -offset 0xFF000000 -range 0x01000000 -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] [get_bd_addr_segs zynq_ultra_ps_e_0/SAXIGP2/HP0_LPS_OCM]
 
@@ -915,5 +943,3 @@ Port;FD4A0000;FD4AFFFF;1|FPD;DPDMA;FD4C0000;FD4CFFFF;1|FPD;DDR_XMPU5_CFG;FD05000
 ##################################################################
 
 create_root_design ""
-
-

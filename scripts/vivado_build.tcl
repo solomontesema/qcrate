@@ -60,7 +60,7 @@ proc ensure_files_in_fileset {files fileset} {
     }
 }
 proc configure_project {} {
-    global cfg_board_part cfg_top
+    global cfg_board_part cfg_top cfg_verilog_defines
 
     if {$cfg_board_part ne ""} {
         set_property board_part $cfg_board_part [current_project]
@@ -69,6 +69,7 @@ proc configure_project {} {
     set_property simulator_language Mixed [current_project]
     set_property XPM_LIBRARIES {XPM_CDC} [current_project]
     set_property top $cfg_top [get_filesets sources_1]
+    set_property verilog_define $cfg_verilog_defines [get_filesets sources_1]
 }
 proc create_project_from_manifest {} {
     global cfg_project_name cfg_part cfg_build_dir cfg_bd_tcl cfg_rtl_files cfg_xdc_files
@@ -188,6 +189,21 @@ proc copy_run_bitstream {} {
     file copy -force [lindex $run_bit_files 0] $bit_file
     return $bit_file
 }
+proc export_debug_probes {} {
+    global cfg_project_name cfg_artifact_dir
+
+    set ltx_file [file join $cfg_artifact_dir "${cfg_project_name}.ltx"]
+    if {[llength [get_debug_cores -quiet]] == 0} {
+        if {[file exists $ltx_file]} {
+            puts "INFO: removing stale debug probes artifact: $ltx_file"
+            file delete -force $ltx_file
+        }
+        return ""
+    }
+
+    write_debug_probes -force $ltx_file
+    return $ltx_file
+}
 proc export_xsa {} {
     global cfg_project_name cfg_artifact_dir
 
@@ -202,6 +218,9 @@ set stage [lindex $argv 1]
 set stage_rank [rank $stage]
 if {![file exists $manifest]} { fail "missing manifest: $manifest" }
 source $manifest
+if {![info exists cfg_verilog_defines]} {
+    set cfg_verilog_defines [list]
+}
 
 file mkdir $cfg_build_dir
 file mkdir $cfg_artifact_dir
@@ -219,8 +238,9 @@ if {$stage eq "export"} {
     }
     open_run impl_1
     set bit_file [copy_run_bitstream]
+    set ltx_file [export_debug_probes]
     set xsa_file [export_xsa]
-    puts "INFO: export complete: $bit_file and $xsa_file"
+    puts "INFO: export complete: $bit_file $xsa_file $ltx_file"
     exit 0
 }
 
@@ -233,7 +253,8 @@ open_impl_and_write_reports
 if {$stage_rank == 2} { exit 0 }
 
 set bit_file [copy_run_bitstream]
+set ltx_file [export_debug_probes]
 if {$stage_rank == 3} { exit 0 }
 
 set xsa_file [export_xsa]
-puts "INFO: build complete: $bit_file and $xsa_file"
+puts "INFO: build complete: $bit_file $xsa_file $ltx_file"

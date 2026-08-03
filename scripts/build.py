@@ -57,7 +57,7 @@ def tq(value: str | Path) -> str:
     return "{" + text + "}"
 
 
-def tcl_list_assignment(name: str, values: list[Path]) -> list[str]:
+def tcl_list_assignment(name: str, values: list[str | Path]) -> list[str]:
     if not values:
         return [f"set {name} [list]"]
     return [
@@ -71,6 +71,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config/build.json")
     parser.add_argument("--stage", choices=STAGES, default="project")
+    parser.add_argument("--define", action="append", default=[],
+                        help="Verilog/SystemVerilog macro for synthesis; may be repeated")
     parser.add_argument("--vivado")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -108,6 +110,9 @@ def main() -> int:
     xdc = discover(root, cfg["xdc_dirs"], {".xdc"})
     if not rtl:
         die("no RTL files discovered")
+    for define in args.define:
+        if not define:
+            die("--define cannot be empty")
 
     manifest = build_dir / "generated" / "build_manifest.tcl"
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -121,6 +126,7 @@ def main() -> int:
         f"set cfg_artifact_dir {tq(artifact_dir)}",
         f"set cfg_bd_tcl {tq(bd_tcl)}",
         f"set cfg_jobs {int(cfg['jobs'])}",
+        *tcl_list_assignment("cfg_verilog_defines", args.define),
         *tcl_list_assignment("cfg_rtl_files", rtl),
         *tcl_list_assignment("cfg_xdc_files", xdc),
     ]
@@ -135,6 +141,8 @@ def main() -> int:
     print(f"BD Tcl    : {bd_tcl}")
     print(f"RTL files : {len(rtl)}")
     print(f"XDC files : {len(xdc)}")
+    if args.define:
+        print("defines   :", " ".join(args.define))
     print(f"stage     : {args.stage}")
     if vivado_settings:
         print("command   :", "source", shlex.quote(vivado_settings), "&&",

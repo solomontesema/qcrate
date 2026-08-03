@@ -9,6 +9,7 @@
 .ip_user_files/
 .sim/
 .runs/
+.srcs/
 .sdk/
 xsim.dir/
 *.xpr

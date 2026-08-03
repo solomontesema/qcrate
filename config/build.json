@@ -8,7 +8,7 @@
   "xdc_dirs": ["kv260/hw/constraints"],
   "build_dir": "build/vivado",
   "artifact_dir": "build/artifacts",
-  "jobs": 8,
+  "jobs": 4,
   "vivado": "vivado",
   "vivado_settings": "/tools/Xilinx/Vivado/2024.2/settings64.sh"
 }

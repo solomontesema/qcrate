@@ -1,0 +1,19 @@
+# PetaLinux and Yocto generated state
+/.petalinux/
+/build/
+/components/
+/images/
+/pre-built/
+/logs/
+
+# Hardware handoff copied by petalinux-config
+/project-spec/hw-description/
+
+# Generated deployment and SDK artifacts
+/*.bsp
+/*.wic
+/*.wic.*
+/BOOT.BIN
+/boot.scr
+/rootfs.*
+/sdk.sh

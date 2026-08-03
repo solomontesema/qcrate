@@ -39,38 +39,65 @@ module qcrate_apb_fabric #(
 
     localparam logic [APB_DATA_WIDTH-1:0] UNMAPPED_PRDATA = 32'hDEAD_BEEF;
 
+    typedef enum logic [1:0] {
+        SEL_NONE     = 2'b00,
+        SEL_SYS      = 2'b01,
+        SEL_STREAM   = 2'b10,
+        SEL_UNMAPPED = 2'b11
+    } apb_sel_t;
+
     logic [3:0] page;
-    logic       sys_hit;
-    logic       stream_hit;
+    apb_sel_t   selected_q;
 
     assign page = paddr_i[15:12];
-    assign sys_hit = psel_i && (page == 4'h0);
-    assign stream_hit = psel_i && (page == 4'h1);
 
-    assign sys_psel_o = sys_hit;
-    assign stream_psel_o = stream_hit;
+    always_ff @(posedge pclk_i) begin
+        if (!presetn_i) begin
+            selected_q <= SEL_NONE;
+        end else if (psel_i && !penable_i) begin
+            unique case (page)
+                4'h0: selected_q <= SEL_SYS;
+                4'h1: selected_q <= SEL_STREAM;
+                default: selected_q <= SEL_UNMAPPED;
+            endcase
+        end else if (!psel_i) begin
+            selected_q <= SEL_NONE;
+        end
+    end
+
+    assign sys_psel_o = psel_i && (selected_q == SEL_SYS);
+    assign stream_psel_o = psel_i && (selected_q == SEL_STREAM);
 
     always_comb begin
         prdata_o = '0;
         pready_o = 1'b1;
         pslverr_o = 1'b0;
 
-        if (sys_hit) begin
-            prdata_o = sys_prdata_i;
-            pready_o = sys_pready_i;
-            pslverr_o = sys_pslverr_i;
-        end else if (stream_hit) begin
-            prdata_o = stream_prdata_i;
-            pready_o = stream_pready_i;
-            pslverr_o = stream_pslverr_i;
-        end else if (psel_i) begin
-            prdata_o = UNMAPPED_PRDATA;
-            pslverr_o = penable_i;
-        end
+        unique case (selected_q)
+            SEL_SYS: begin
+                prdata_o = sys_prdata_i;
+                pready_o = sys_pready_i;
+                pslverr_o = sys_pslverr_i;
+            end
+
+            SEL_STREAM: begin
+                prdata_o = stream_prdata_i;
+                pready_o = stream_pready_i;
+                pslverr_o = stream_pslverr_i;
+            end
+
+            SEL_UNMAPPED: begin
+                prdata_o = UNMAPPED_PRDATA;
+                pslverr_o = psel_i && penable_i;
+            end
+
+            default: begin
+            end
+        endcase
     end
 
     logic unused_inputs;
-    assign unused_inputs = &{1'b0, pclk_i, presetn_i, pwrite_i, pwdata_i};
+    assign unused_inputs = &{1'b0, pwrite_i, pwdata_i};
 
 endmodule
 

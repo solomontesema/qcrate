@@ -56,6 +56,21 @@ module qcrate_top(
         .user_irq_in            (qcrate_irq)
     );
 
+`ifdef QCRATE_APB_CANARY
+
+    // Diagnostic APB endpoint: proves the BD-to-top APB path before qcrate_core.
+    assign APB_M_0_prdata = 32'h5143_5254;
+    assign APB_M_0_pready = 1'b1;
+    assign APB_M_0_pslverr = 1'b0;
+
+    assign S_AXIS_S2MM_0_tdata = 32'h0000_0000;
+    assign S_AXIS_S2MM_0_tkeep = 4'hF;
+    assign S_AXIS_S2MM_0_tvalid = 1'b0;
+    assign S_AXIS_S2MM_0_tlast = 1'b0;
+    assign qcrate_irq = 1'b0;
+
+`else
+
     // ------------------------------------------------------------
     // Entire custom Q-Crate application
     // ------------------------------------------------------------
@@ -92,6 +107,8 @@ module qcrate_top(
         //.shot_trigger_o        (shot_trigger_o),
         //.sync_pulse_o          (sync_pulse_o)
     );
+
+`endif
 
 `ifdef QCRATE_ENABLE_ILA
 
