@@ -1,0 +1,15 @@
+[Unit]
+Description=Load the fixed Q-Crate programmable-logic platform
+After=local-fs.target
+Before=dfx-mgr.service kria-dashboard.service multi-user.target
+Conflicts=dfx-mgr.service
+
+[Service]
+Type=oneshot
+RuntimeDirectory=qcrate-pl-load
+WorkingDirectory=/run/qcrate-pl-load
+ExecStart=/usr/bin/qcrate-load-pl
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

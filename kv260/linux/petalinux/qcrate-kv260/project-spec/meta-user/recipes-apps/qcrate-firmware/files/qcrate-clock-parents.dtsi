@@ -1,0 +1,12 @@
+/*
+ * Factory QSPI does not run the XSA-generated psu_init code. Reproduce the
+ * Vivado clock-source selection before the generated assigned rates are set.
+ * DPLL is clock ID 3 in xlnx-zynqmp-clk.h.
+ */
+&clocking0 {
+	assigned-clock-parents = <&zynqmp_clk 3>;
+};
+
+&clocking1 {
+	assigned-clock-parents = <&zynqmp_clk 3>;
+};

@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Install and accept the Q-Crate KV260 platform firmware on target."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Sequence
+
+
+DEFAULT_BOOTFW = Path(
+    "/home/petalinux/qcrate/bootfw/qcrate-kv260-bootfw.bin"
+)
+FPGA_STATE = Path("/sys/class/fpga_manager/fpga0/state")
+OVERLAY_STATUS = Path("/configfs/device-tree/overlays/full/status")
+FIRMWARE_NAME = Path("/proc/device-tree/fpga-region/firmware-name")
+CLOCKS = (
+    ("pl_clk0", Path("/sys/devices/platform/axi/axi:clocking0/set_rate"), 200_000_000),
+    ("pl_clk1", Path("/sys/devices/platform/axi/axi:clocking1/set_rate"), 100_000_000),
+)
+CLOCK_TOLERANCE_HZ = 1_000
+
+
+class FirstBootError(RuntimeError):
+    """Expected target acceptance failure."""
+
+
+def run(argv: Sequence[os.PathLike[str] | str]) -> None:
+    command = [os.fspath(item) for item in argv]
+    print("+ " + " ".join(command), flush=True)
+    subprocess.run(command, check=True)
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        raise FirstBootError("run this command through sudo")
+
+
+def require_commands(*commands: str) -> None:
+    missing = [command for command in commands if shutil.which(command) is None]
+    if missing:
+        raise FirstBootError("missing target commands: " + ", ".join(missing))
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="ascii").rstrip("\0\n")
+    except OSError as exc:
+        raise FirstBootError(f"cannot read {path}: {exc}") from exc
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise FirstBootError(f"cannot read {path}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def verify_bootfw(firmware: Path) -> None:
+    checksum = firmware.with_name(f"{firmware.name}.sha256")
+    try:
+        fields = checksum.read_text(encoding="ascii").strip().split()
+    except OSError as exc:
+        raise FirstBootError(f"cannot read checksum {checksum}: {exc}") from exc
+    if len(fields) != 2 or fields[1].lstrip("*") != firmware.name:
+        raise FirstBootError(f"invalid portable checksum file: {checksum}")
+    actual = sha256(firmware)
+    if actual != fields[0].lower():
+        raise FirstBootError(
+            f"boot-firmware checksum mismatch: expected {fields[0]}, got {actual}"
+        )
+    print(f"OK  boot firmware SHA-256 {actual}")
+
+
+def install_bootfw(firmware: Path, poweroff: bool) -> None:
+    require_commands("xmutil")
+    verify_bootfw(firmware)
+    run(["xmutil", "bootfw_status"])
+    run(["xmutil", "bootfw_update", "-i", firmware])
+    run(["xmutil", "bootfw_status"])
+    print("OK  inactive A/B slot updated; a full power cycle is required")
+    if poweroff:
+        run(["sync"])
+        run(["systemctl", "poweroff"])
+    else:
+        print("NEXT: sudo poweroff, remove power, then boot and run:")
+        print("      sudo qcrate-first-boot accept")
+
+
+def check_platform() -> None:
+    require_commands("systemctl", "qcrate-apb")
+    try:
+        subprocess.run(
+            ["systemctl", "is-active", "--quiet", "qcrate-pl-load.service"],
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        run(["systemctl", "status", "qcrate-pl-load.service", "--no-pager", "-l"])
+        raise FirstBootError("qcrate-pl-load.service is not active") from exc
+    print("OK  qcrate-pl-load.service is active")
+
+    state = read_text(FPGA_STATE)
+    if state != "operating":
+        raise FirstBootError(f"FPGA Manager state is {state!r}, expected 'operating'")
+    print("OK  FPGA Manager state is operating")
+
+    overlay = read_text(OVERLAY_STATUS)
+    if overlay != "applied":
+        raise FirstBootError(f"PL overlay state is {overlay!r}, expected 'applied'")
+    print("OK  full PL overlay is applied")
+
+    firmware = read_text(FIRMWARE_NAME)
+    if firmware != "qcrate_kv260.bit.bin":
+        raise FirstBootError(
+            f"FPGA region contains {firmware!r}, expected 'qcrate_kv260.bit.bin'"
+        )
+    print("OK  FPGA region contains qcrate_kv260.bit.bin")
+
+    for name, path, expected in CLOCKS:
+        try:
+            actual = int(read_text(path), 10)
+        except ValueError as exc:
+            raise FirstBootError(f"invalid {name} rate in {path}") from exc
+        if abs(actual - expected) > CLOCK_TOLERANCE_HZ:
+            raise FirstBootError(
+                f"{name} is {actual} Hz, expected {expected} Hz "
+                f"(+/- {CLOCK_TOLERANCE_HZ} Hz)"
+            )
+        print(f"OK  {name} rate {actual} Hz")
+
+
+def run_apb_acceptance() -> None:
+    run(["qcrate-apb", "smoke", "--skip-writes"])
+    run(["qcrate-apb", "smoke"])
+    run(["qcrate-apb", "dump"])
+
+
+def accept_bootfw() -> None:
+    require_commands("xmutil")
+    run(["xmutil", "bootfw_status"])
+    check_platform()
+    run_apb_acceptance()
+    run(["xmutil", "bootfw_update", "-v"])
+    run(["xmutil", "bootfw_status"])
+    print("PASS Q-Crate platform, APB, and A/B boot-firmware acceptance")
+
+
+def routine_test() -> None:
+    check_platform()
+    run_apb_acceptance()
+    print("PASS Q-Crate platform and APB acceptance")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    install = subparsers.add_parser(
+        "install", help="verify and write the firmware to the inactive A/B slot"
+    )
+    install.add_argument(
+        "--firmware",
+        type=Path,
+        default=DEFAULT_BOOTFW,
+        help=f"BOOT.BIN input (default: {DEFAULT_BOOTFW})",
+    )
+    install.add_argument(
+        "--poweroff",
+        action="store_true",
+        help="power off automatically after a successful A/B update",
+    )
+
+    subparsers.add_parser(
+        "accept",
+        help="after the power cycle, test the platform and accept the A/B candidate",
+    )
+    subparsers.add_parser(
+        "test", help="run routine platform and APB tests without changing QSPI state"
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        require_root()
+        if args.command == "install":
+            install_bootfw(args.firmware, args.poweroff)
+        elif args.command == "accept":
+            accept_bootfw()
+        elif args.command == "test":
+            routine_test()
+        else:
+            raise FirstBootError(f"unsupported command: {args.command}")
+    except (FirstBootError, OSError, subprocess.CalledProcessError) as exc:
+        print(f"qcrate-first-boot: FAIL: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

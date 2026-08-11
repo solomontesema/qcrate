@@ -1,0 +1,103 @@
+#!/bin/sh
+set -eu
+
+firmware_dir=/lib/firmware/xilinx/base
+bitstream=${firmware_dir}/qcrate_kv260.bit.bin
+overlay=${firmware_dir}/pl.dtbo
+overlay_dir=/configfs/device-tree/overlays/full
+fpga_state_file=/sys/class/fpga_manager/fpga0/state
+firmware_name_file=/proc/device-tree/fpga-region/firmware-name
+clock0_rate_file=/sys/devices/platform/axi/axi:clocking0/set_rate
+clock1_rate_file=/sys/devices/platform/axi/axi:clocking1/set_rate
+
+fail() {
+    echo "qcrate-load-pl: $*" >&2
+    exit 1
+}
+
+wait_for_readable() {
+    path=$1
+    description=$2
+    attempts=0
+
+    while [ "${attempts}" -lt 50 ]; do
+        [ -r "${path}" ] && return 0
+        attempts=$((attempts + 1))
+        sleep 0.1
+    done
+
+    fail "timed out waiting for ${description}: ${path}"
+}
+
+check_rate() {
+    path=$1
+    expected=$2
+    clock_name=$3
+    tolerance=1000
+
+    wait_for_readable "${path}" "${clock_name} rate"
+    actual=$(cat "${path}")
+    case "${actual}" in
+        ''|*[!0-9]*) fail "${clock_name} returned invalid rate '${actual}'" ;;
+    esac
+
+    delta=$((actual - expected))
+    [ "${delta}" -lt 0 ] && delta=$((-delta))
+    if [ "${delta}" -gt "${tolerance}" ]; then
+        fail "${clock_name} rate is ${actual} Hz, expected ${expected} Hz (+/- ${tolerance} Hz)"
+    fi
+
+    echo "qcrate-load-pl: ${clock_name} rate ${actual} Hz"
+}
+
+validate_platform() {
+    wait_for_readable "${fpga_state_file}" "FPGA Manager state"
+    fpga_state=$(cat "${fpga_state_file}")
+    [ "${fpga_state}" = "operating" ] || \
+        fail "FPGA Manager state is '${fpga_state}', expected 'operating'"
+
+    overlay_status_file=${overlay_dir}/status
+    wait_for_readable "${overlay_status_file}" "full-overlay status"
+    overlay_status=$(cat "${overlay_status_file}")
+    [ "${overlay_status}" = "applied" ] || \
+        fail "overlay status is '${overlay_status}', expected 'applied'"
+
+    wait_for_readable "${firmware_name_file}" "live firmware identity"
+    firmware_name=$(tr -d '\000' < "${firmware_name_file}")
+    [ "${firmware_name}" = "qcrate_kv260.bit.bin" ] || \
+        fail "full overlay owns firmware '${firmware_name}', expected 'qcrate_kv260.bit.bin'"
+
+    check_rate "${clock0_rate_file}" 200000000 pl_clk0
+    check_rate "${clock1_rate_file}" 100000000 pl_clk1
+}
+
+if [ ! -r "${bitstream}" ]; then
+    fail "missing bitstream: ${bitstream}"
+fi
+
+if [ ! -r "${overlay}" ]; then
+    fail "missing device-tree overlay: ${overlay}"
+fi
+
+if [ -e "${overlay_dir}" ]; then
+    echo "qcrate-load-pl: full overlay already exists; validating its owner"
+    validate_platform
+    echo "qcrate-load-pl: existing Q-Crate platform is valid"
+    exit 0
+fi
+
+fpgautil_log=$(mktemp /run/qcrate-pl-load/fpgautil.XXXXXX)
+trap 'rm -f "${fpgautil_log}"' EXIT
+
+if ! /usr/bin/fpgautil -b "${bitstream}" -o "${overlay}" >"${fpgautil_log}" 2>&1; then
+    cat "${fpgautil_log}" >&2
+    fail "fpgautil returned failure"
+fi
+
+cat "${fpgautil_log}"
+if grep -Eiq 'failed|error' "${fpgautil_log}"; then
+    fail "fpgautil reported an error despite returning success"
+fi
+
+validate_platform
+echo "qcrate-load-pl: Q-Crate bitstream, overlay, and fabric clocks are valid"

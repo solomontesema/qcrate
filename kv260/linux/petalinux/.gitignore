@@ -1,19 +1,37 @@
 # PetaLinux and Yocto generated state
-/.petalinux/
-/build/
-/components/
-/images/
-/pre-built/
-/logs/
+/.tmp/
+/KV260_BSP_DOWLOADED/
+/qcrate-kv260-xsct-import-probe/
+/.qcrate-petalinux-bootstrap-*/
+/qcrate-petalinux-bootstrap-*/
+/qcrate-kv260/hardware/
+/qcrate-kv260/README
+**/.petalinux/
+**/build/
+**/components/
+**/images/
+**/pre-built/
+**/logs/
 
 # Hardware handoff copied by petalinux-config
-/project-spec/hw-description/
+**/project-spec/hw-description/
+**/project-spec/configs/.statistics
+**/project-spec/configs/configs/
+**/project-spec/configs/*.cmake
+**/project-spec/configs/*.dtb
+**/project-spec/configs/*.log
+**/project-spec/configs/*.old
+**/project-spec/configs/*.pp
+**/project-spec/configs/*.yaml
+**/project-spec/configs/rootfsconfigs/
+**/project-spec/configs/pl.dtsi
+**/__pycache__/
 
 # Generated deployment and SDK artifacts
-/*.bsp
-/*.wic
-/*.wic.*
-/BOOT.BIN
-/boot.scr
-/rootfs.*
-/sdk.sh
+**/*.bsp
+**/*.wic
+**/*.wic.*
+**/BOOT.BIN
+**/boot.scr
+**/rootfs.*
+**/sdk.sh
