@@ -1,4 +1,4 @@
-# Q-Crate Linux DMA capture
+# Q-Crate Linux DMA capture and frame chaining
 
 ## Purpose and status
 
@@ -11,7 +11,8 @@ management with the Linux DMAEngine ownership model.
 qcrate_stream_engine (200 MHz)
         | AXI4-Stream: data, keep, valid, ready, last
         v
-AXI DMA S2MM simple mode
+AXI DMA S2MM scatter-gather
+        | one pre-armed descriptor per frame
         | AXI HP0
         v
 kernel coherent DDR buffer
@@ -20,24 +21,58 @@ kernel coherent DDR buffer
 qcrate-dma verifier
 ```
 
-Current scope:
+Current source scope:
 
-- receive-only AXI DMA simple mode;
+- receive-only AXI DMA scatter-gather;
 - one frame per DMA descriptor;
+- one finite RTL `START` for an entire descriptor chain;
+- frame-major coherent-buffer layout with increasing frame IDs;
 - kernel-owned Q-Crate control registers and DMA channel;
 - one exclusive userspace owner;
 - timeout, stream reset, and DMA termination recovery;
 - complete verification of `{frame_id[15:0], sample_index[15:0]}`;
-- repeat testing of independent one-frame captures.
+- backward-compatible one-frame capture and repeat testing.
 
-Scatter-gather rings, uninterrupted multi-frame acquisition, and sustained
-throughput measurement are later milestones. `--repeat 100` currently starts
-100 independent one-frame commands, so every capture intentionally has frame
-ID zero.
+Cyclic rings, indefinite acquisition, concurrent userspace consumption, and
+sustained network streaming remain later milestones. `capture --repeat 100`
+still starts 100 independent one-frame commands. `capture-frames --frames N`
+starts the stream once and receives frame IDs `0` through `N-1` through a
+pre-armed SG chain.
 
-Status: accepted on KV260. The acceptance run completed 100 independent
-captures of 4095 words without timeout or stale data, verified every word from
-`0x00000000` through `0x00000ffe`, and reported zero stream stall cycles.
+Status:
+
+- Simple-mode baseline accepted on KV260: 100 independent captures of 4095
+  words, every word verified, zero timeouts, stale data, or stall cycles.
+- Finite SG-chain capture accepted on KV260: the 4096-word one-frame regression,
+  one 8-frame chain, one 64-frame chain filling the complete 1 MiB buffer, and
+  100 repeated 8-frame chains all passed with every word and frame ID verified.
+
+## Multi-frame architecture decision
+
+Three implementations were considered before changing the accepted baseline:
+
+| Option | Benefit | Technical consequence | Decision |
+| --- | --- | --- | --- |
+| One aggregate S2MM descriptor | Small software change | Intermediate `TLAST` values terminate AXI DMA packets before the aggregate byte count; several framed packets are not one S2MM transfer | Rejected |
+| Simple-mode callback rearming | Reuses the existing bitstream | Linux must program the next transfer after every interrupt, so `TREADY` drops for software latency between frames | Kept only as a diagnostic experiment |
+| Finite scatter-gather chain | All destinations are armed before `START`; hardware follows descriptors across `TLAST` boundaries | Requires SG logic, an `M_AXI_SG` DDR connection, a new XSA, and descriptor memory | Approved |
+
+The exact Xilinx 2024.2 DMAEngine driver reinforces this choice. In simple mode
+it programs only the first pending descriptor. The pending software list then
+becomes active, but there are no SG completion bits with which to distinguish
+the remaining entries. Pre-queuing simple-mode descriptors is therefore not a
+valid substitute for hardware SG. Callback rearming is safe because Q-Crate
+obeys AXI4-Stream backpressure, but it deliberately places Linux scheduling in
+the frame-to-frame data path.
+
+The approved implementation is finite rather than cyclic. The driver submits
+one destination descriptor per frame into consecutive slots of one coherent
+buffer, submits the complete chain, calls `dma_async_issue_pending()`, and only
+then writes one RTL `START`. AXI DMA consumes each `TLAST` into the corresponding
+descriptor and fetches the next descriptor without userspace intervention.
+
+The chain is capped at 255 frames. This matches AXI DMA's interrupt coalescing
+counter and leaves cyclic buffer ownership for a later streaming milestone.
 
 ## Why DMAEngine
 
@@ -61,9 +96,13 @@ capture or buffer reuse.
 
 ## Source map
 
-All deployable files live in the tracked PetaLinux `meta-user` layer:
+Hardware and deployable software sources are tracked in these locations:
 
 ```text
+kv260/hw/bd/design_1.tcl
+    Enables SG, routes M_AXI_SG through the data SmartConnect, and selects the
+    23-bit descriptor length.
+
 recipes-apps/qcrate-firmware/files/qcrate-dma-client.dtsi
     Adds the client to the same PL overlay as axi_dma_0.
 
@@ -92,26 +131,42 @@ touch `0xA0010000` while the control clock or interconnect is unavailable.
 
 ## Capture ordering
 
-For each ioctl the driver performs this sequence:
+For a finite SG-chain ioctl the driver performs this sequence:
 
-1. Lock the device and terminate any stale DMA transaction.
-2. Soft-reset the stream generator and wait for its CDC command to complete.
-3. Program frame length, one frame, pattern mode, and disabled Q-Crate IRQs.
-4. Prepare and submit one `DMA_DEV_TO_MEM` descriptor.
-5. Call `dma_async_issue_pending()` so S2MM is armed.
-6. Write `STREAM.CONTROL.START` only after the DMA is ready.
-7. Wait for the DMA completion callback with a bounded timeout.
-8. Check DMA result/residue and Q-Crate done/error/status registers.
-9. Expose the coherent buffer for userspace verification.
+1. Lock the exclusively owned DMA client and soft-reset the stream generator.
+2. Wait for the stream reset CDC command to complete.
+3. Validate one descriptor's size and the complete chain against hardware and
+   coherent-buffer limits.
+4. Program frame length, finite frame count, pattern mode, and disabled Q-Crate
+   IRQs.
+5. Prepare and submit one `DMA_DEV_TO_MEM` descriptor per consecutive frame
+   slot; attach the completion callback to the final descriptor.
+6. Call `dma_async_issue_pending()` so the complete S2MM chain is armed.
+7. Write `STREAM.CONTROL.START` only after the DMA is ready.
+8. Wait for the final DMA completion callback with a bounded timeout.
+9. Check DMA result/residue, completed-frame count, final frame/sample indexes,
+   and Q-Crate done/error status.
+10. Expose the frame-major coherent buffer for userspace verification.
+
+The driver does not call `dmaengine_terminate_sync()` before a normal capture.
+Requesting the channel gives Q-Crate exclusive DMAEngine ownership, so there is
+no previous client's transaction to discard. More importantly, the Xilinx
+2024.2 SG provider can remain non-halted while it has no submitted descriptor;
+trying to halt that initial state enters its atomic status poll before Q-Crate
+has armed any work. Synchronous termination remains on timeout, submission
+failure, remove, and other recovery paths where Q-Crate actually owns pending
+or active descriptors.
 
 Arm-before-start is a required protocol rule. The stream engine does obey
 backpressure and would hold `TVALID`, `TDATA`, and `TLAST` stable while DMA
 keeps `TREADY` low, but deliberately relying on that stall adds avoidable
-latency and obscures failures.
+latency and obscures failures. SG may still apply short hardware backpressure
+while fetching descriptors; correctness requires no lost or duplicated words,
+not a promise that `TREADY` can never deassert.
 
-## Current AXI DMA length limit
+## AXI DMA SG and length limits
 
-The current XSA reports:
+The accepted simple-mode XSA reported:
 
 ```text
 xlnx,sg-length-width = <14>
@@ -119,25 +174,31 @@ maximum byte count   = (2^14)-1 = 16383
 maximum whole words  = floor(16383/4) = 4095
 ```
 
-The property controls the buffer-length register in simple mode too; its name
-does not mean it matters only when scatter-gather is enabled. A 4096-word frame
-is 16384 bytes and therefore does not fit today.
-
-The driver reads this property from the live DMA controller. The userspace
-default is `min(4096, reported_limit)`, so it selects 4095 words now and will
-select 4096 automatically after the hardware width becomes 23 or 26 bits.
-
-When that hardware change is scheduled, add this property to the AXI DMA
-configuration in `kv260/hw/bd/design_1.tcl`:
+The SG milestone changes the exported BD Tcl to:
 
 ```tcl
+CONFIG.c_include_sg {1}
+CONFIG.c_sg_include_stscntrl_strm {0}
 CONFIG.c_sg_length_width {23}
 ```
 
-Use 26 instead when the planned maximum single descriptor genuinely needs it.
-A wider field raises the legal byte count; it does not allocate a buffer or
-enable scatter-gather. Rebuild Vivado/XSA and then regenerate PetaLinux SDT so
-the hardware and `xlnx,sg-length-width` remain matched.
+After rebuilding the XSA and regenerating SDT, the expected provider properties
+are enabled `xlnx,include-sg` and `xlnx,sg-length-width = <23>`. The maximum
+single descriptor becomes `(2^23)-1 = 8388607` bytes. The current 1 MiB coherent
+buffer is therefore the practical request limit, not the descriptor length.
+
+The driver reads this property from the live DMA controller. The userspace
+default is `min(4096, reported_limit)`, so it automatically moves from 4095 to
+4096 words after deployment. At 4096 words per frame, the 1 MiB buffer holds 64
+frames. Shorter frames may fit more slots, up to the explicit 255-frame chain
+cap. A 26-bit field would add no useful capacity until the coherent-buffer
+contract also grows, so 23 bits is the deliberate choice rather than a maximum
+setting by habit.
+
+Both `petalinux_flow.py configure` and the `qcrate-firmware` recipe reject an
+XSA-derived `pl.dtsi` that does not report enabled SG, the 23-bit length, and a
+disabled control/status stream. This prevents a stale or sideband-enabled XSA
+from being packaged with the new driver.
 
 ## Host build
 
@@ -151,20 +212,12 @@ qcrate-dma-tools/files/qcrate-dma --help
 git diff --check
 ```
 
-Compile only the new recipes first. This is the fastest way to find a kernel
-API, recipe, or packaging error while reusing the existing Yocto build state:
-
-```bash
-source /tools/Xilinx/PetaLinux/2024.2/settings.sh
-cd /tools/fpga_projects/qcrate/kv260/linux/petalinux/qcrate-kv260
-petalinux-build -c qcrate-dma
-petalinux-build -c qcrate-dma-tools
-petalinux-build -c qcrate-firmware
-```
-
-Success means BitBake finishes each named recipe without an `ERROR:` line.
-For a module compile failure, return the first compiler `error:` and several
-lines around it; the final BitBake task summary is usually secondary.
+Do not build the recipes against the old XSA. The firmware recipe now rejects
+simple-mode SDT deliberately. Rebuild Vivado and run the PetaLinux `configure`
+stage first, then use the focused recipe builds below. Success means BitBake
+finishes each named recipe without an `ERROR:` line. For a module compile
+failure, return the first compiler `error:` and several lines around it; the
+final BitBake task summary is usually secondary.
 
 An immediate `make: *** No targets. Stop.` means the external-module Makefile
 did not provide the `all` target that delegates to kernel Kbuild. Merely setting
@@ -182,12 +235,48 @@ package depends on that exact generated name. `IMAGE_INSTALL` therefore uses
 `qcrate-dma`, not an unversioned `kernel-module-qcrate-dma` request that DNF
 cannot resolve and not a hardcoded kernel-versioned package name.
 
-After the focused builds pass, produce the updated image using the existing
-reproducible flow. No Vivado stage is needed for the present 4095-word test:
+This milestone changes the AXI DMA hardware, so first recreate the Vivado
+project from the tracked BD Tcl and export a matching bitstream and XSA:
 
 ```bash
 cd /tools/fpga_projects/qcrate
+python3 scripts/build.py --stage all
+```
+
+Expected artifacts are `build/artifacts/qcrate_kv260.bit` and
+`build/artifacts/qcrate_kv260.xsa`; synthesis and implementation must finish
+without errors. Then regenerate SDT from that XSA. This stage intentionally
+fails if SG or the 23-bit length is absent:
+
+```bash
 source /tools/Xilinx/PetaLinux/2024.2/settings.sh
+python3 kv260/linux/petalinux/scripts/petalinux_flow.py configure
+
+rg 'xlnx,(include-sg|sg-length-width)' \
+  build/petalinux/sdt/qcrate-kv260/pl.dtsi
+```
+
+`configure` also transactionally invalidates the ignored PetaLinux
+`components/plnx_workspace` and `project-spec/configs/pl.dtsi`. Lopper must
+then regenerate the full `/plugin/` overlay from the new hardware description;
+the flow audits its firmware name, SG enable, and 23-bit length. This avoids
+silently packaging a workspace left over from an older XSA. If import fails,
+the script restores the previous workspace and generated overlay for diagnosis.
+
+Compile the three directly affected recipes before paying for a full image
+build:
+
+```bash
+cd kv260/linux/petalinux/qcrate-kv260
+petalinux-build -c qcrate-dma
+petalinux-build -c qcrate-dma-tools
+petalinux-build -c qcrate-firmware
+cd /tools/fpga_projects/qcrate
+```
+
+After those focused builds pass, produce and audit the complete image:
+
+```bash
 python3 kv260/linux/petalinux/scripts/petalinux_flow.py build
 python3 kv260/linux/petalinux/scripts/petalinux_flow.py package
 ```
@@ -204,6 +293,15 @@ python3 kv260/linux/petalinux/scripts/petalinux_flow.py deploy \
 
 The PetaLinux build and SD deployment are intentionally left as user-run
 operations because they are long and the device selection is destructive.
+
+For a fresh disposable card, the same process can be run after the Vivado build
+as one host command. It repeats `configure`, so use it when end-to-end
+reproducibility matters more than preserving the focused-stage time:
+
+```bash
+python3 kv260/linux/petalinux/scripts/petalinux_flow.py all \
+  --device /dev/mmcblk0
+```
 
 ## Target acceptance
 
@@ -223,11 +321,18 @@ ls -l /dev/qcrate-dma
 sudo qcrate-dma info
 ```
 
-Expected first-build limits are 1 MiB of coherent memory, 16383 DMA bytes, and
-4095 whole stream words.
+Expected SG-build facts are:
 
-Run one complete capture. With the present hardware, omitting `--words`
-selects 4095 automatically:
+```text
+coherent buffer    : 1048576 bytes
+DMA transfer limit : 8388607 bytes
+maximum frame      : 262144 words
+SG frame chaining  : yes
+maximum SG frames  : 255
+```
+
+First rerun the backward-compatible one-frame path. Omitting `--words` now
+selects 4096 automatically:
 
 ```bash
 sudo qcrate-dma capture
@@ -236,8 +341,8 @@ sudo qcrate-dma capture
 Expected final lines include:
 
 ```text
-PASS 1 capture(s), 4095 words each; every word verified
-first/last         : 0x00000000 / 0x00000ffe
+PASS 1 capture(s), 4096 words each; every word verified
+first/last         : 0x00000000 / 0x00000fff
 completed frames   : 1
 ```
 
@@ -247,22 +352,44 @@ Exercise repeated channel teardown, rearming, stream reset, and buffer reuse:
 sudo qcrate-dma capture --repeat 100
 ```
 
+Then prove the new contract: one RTL start, eight pre-armed descriptors, eight
+increasing frame IDs, and complete verification of all 32768 words:
+
+```bash
+sudo qcrate-dma capture-frames --words 4096 --frames 8
+```
+
+Expected final evidence includes:
+
+```text
+PASS 1 chain(s), 8 frames x 4096 words; every word verified
+first/last         : 0x00000000 / 0x00070fff
+completed frames   : 8
+final frame/sample : 7 / 4095
+```
+
+Exercise the complete 1 MiB coherent buffer, then repeat smaller chains to test
+descriptor reuse, termination cleanup, and frame-ID restart behavior:
+
+```bash
+sudo qcrate-dma capture-frames --words 4096 --frames 64
+sudo qcrate-dma capture-frames --words 4096 --frames 8 --repeat 100
+```
+
+The 64-frame last word must be `0x003f0fff`. The accepted board run measured 35
+stall cycles for 8 frames and 315 for 64 frames: exactly five cycles at each
+inter-frame SG descriptor transition. This deterministic hardware backpressure
+is protocol-legal because every word and boundary verifies. Future throughput
+work should retain this measurement as the baseline and investigate any larger
+or unstable count.
+
 Save the final captured frame when offline inspection is useful:
 
 ```bash
-sudo qcrate-dma capture --output /tmp/qcrate-frame.bin
-od -Ax -tx4 -N 64 /tmp/qcrate-frame.bin
+sudo qcrate-dma capture-frames --words 4096 --frames 8 \
+  --output /tmp/qcrate-frames.bin
+od -Ax -tx4 -N 64 /tmp/qcrate-frames.bin
 ```
-
-After increasing the Vivado length width and deploying the matching XSA-derived
-overlay, the planned frame command becomes:
-
-```bash
-sudo qcrate-dma info
-sudo qcrate-dma capture --words 4096
-```
-
-The final word should then be `0x00000fff`.
 
 ## Diagnostics
 
@@ -273,6 +400,20 @@ sudo modprobe qcrate_dma
 sudo dmesg | tail -100
 find /proc/device-tree -name 'qcrate-dma@a0010000' -print
 ```
+
+If `qcrate-dma info` reports `SG frame chaining : no`, do not run
+`capture-frames`. Confirm that the card contains the newly built bitstream and
+that the live provider advertises SG and the 23-bit length:
+
+```bash
+find /proc/device-tree -path '*dma@a0000000*' -print
+od -An -tx1 /proc/device-tree/axi/dma@a0000000/xlnx,sg-length-width
+test -e /proc/device-tree/axi/dma@a0000000/xlnx,include-sg && echo SG-present
+sudo dmesg | grep -Ei 'qcrate.*SG|xilinx.*dma'
+```
+
+Missing SG indicates a stale XSA, `pl.dtbo`, bitstream, or SD-card image. The
+build audits are intended to catch the first two cases before deployment.
 
 If `qcrate-pl-load.service` reports `Failed to apply Overlay`, diagnose the
 overlay before inspecting the driver. A platform-driver probe failure does not
@@ -313,22 +454,43 @@ subsequent capture should start from a defined state. A repeating timeout still
 indicates a hardware, interrupt, device-tree, or stream-handshake problem and
 should be diagnosed rather than hidden by retries.
 
+One observed SG failure accepted the complete Q-Crate frame (`DONE`, no stream
+stalls) but never completed the DMA descriptor. The exported HWH showed
+`C_SG_INCLUDE_STSCNTRL_STRM=1` although no AXI DMA control/status stream was
+connected. Q-Crate does not use those Ethernet-oriented sideband channels, so
+the tracked BD explicitly disables the feature and the SDT audits enforce that
+hardware contract.
+
+An RCU stall whose first provider frame is `xilinx_dma_stop_transfer` and whose
+Q-Crate frame is at the beginning of `qcrate_run_capture` indicates an obsolete
+driver that still terminates the idle SG channel before descriptor submission.
+Rebuild and deploy `qcrate-dma`; do not treat this as a stream timeout because
+the RTL `START` has not occurred yet.
+
 ## Acceptance boundary
 
-This milestone is complete when:
+The finite multi-frame milestone is complete when:
 
-1. The Xilinx AXI DMA provider and `qcrate_dma` client probe without errors.
-2. `qcrate-dma info` reports limits matching the deployed device tree.
-3. A single maximum legal frame completes without residue.
-4. Every captured word matches the deterministic pattern.
-5. One hundred independent captures pass without timeout or stale data.
-6. The fixed-platform clock and APB regression still passes.
+1. Vivado exports SG-enabled AXI DMA with a 23-bit length and a connected
+   `M_AXI_SG` DDR path.
+2. The generated DT reports SG, and both `xilinx_dma` and `qcrate_dma` probe
+   without errors.
+3. The accepted one-frame regression still passes at 4096 words.
+4. One eight-frame command returns frame IDs `0..7`, correct `TLAST` boundaries,
+   zero residue, and every expected word.
+5. A 64-by-4096-word chain fills and verifies the complete 1 MiB buffer.
+6. One hundred eight-frame chains pass without timeout, stale data, loss,
+   duplication, or frame-order errors.
+7. The fixed-platform clock and APB regression still passes.
 
-The next extension is true consecutive multi-frame acquisition: start the
-stream generator once with increasing frame IDs and keep capture service ready
-across each `TLAST`. That step will determine whether simple-mode descriptor
-rearming is sufficient or whether Q-Crate should enable scatter-gather and use
-a descriptor ring.
+All seven conditions were accepted on the KV260. The final run passed 100
+independent 4096-word captures, an 8-frame chain ending at `0x00070fff`, a
+64-frame chain ending at `0x003f0fff`, and 100 repeated 8-frame chains without
+timeouts, stale data, loss, duplication, or frame-order errors.
+
+The next DMA extension after acceptance is cyclic producer/consumer buffering
+with sustained throughput and overrun accounting. It should not be started
+until finite buffer ownership and SG framing are proven on the board.
 
 ## References
 

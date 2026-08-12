@@ -31,6 +31,13 @@ do_configure() {
     test -s ${QCRATE_CLOCK_PARENTS_DTSI}
     test -s ${QCRATE_DMA_CLIENT_DTSI}
 
+    grep -Eq 'xlnx,include-sg[[:space:]]*(;|=[[:space:]]*<[[:space:]]*(0x)?0*1[[:space:]]*>)' \
+        ${QCRATE_PL_DTSI} || bbfatal "XSA-matched pl.dtsi does not enable AXI DMA scatter-gather"
+    grep -Eq 'xlnx,sg-length-width[[:space:]]*=[[:space:]]*<[[:space:]]*(23|0x0*17)[[:space:]]*>' \
+        ${QCRATE_PL_DTSI} || bbfatal "XSA-matched pl.dtsi does not use the required 23-bit SG length"
+    grep -Eq 'xlnx,sg-include-stscntrl-strm[[:space:]]*=[[:space:]]*<[[:space:]]*(0x)?0+[[:space:]]*>' \
+        ${QCRATE_PL_DTSI} || bbfatal "XSA-matched pl.dtsi enables the unused AXI DMA control/status stream"
+
     printf 'all:\n{\n  %s\n}\n' "${QCRATE_BIT}" > ${B}/qcrate_kv260.bif
     cat ${QCRATE_PL_DTSI} ${QCRATE_CLOCK_PARENTS_DTSI} \
         ${QCRATE_DMA_CLIENT_DTSI} \

@@ -56,14 +56,24 @@ The stream and DMA payload path runs on `pl_clk0` at 200 MHz:
 
 ```text
 qcrate_core AXI4-Stream -> AXI DMA S2MM -> data SmartConnect -> PS HP0/DDR
+                              M_AXI_SG -> data SmartConnect -> PS HP0/DDR
 ```
 
 The AXI DMA is the intentional boundary between these domains. Vivado detects
-the different AXI-Lite and S2MM clocks and configures the DMA IP in asynchronous
-clock mode. Its single external `axi_resetn` is driven by the slower 100 MHz
-control reset; the DMA IP handles its internal reset crossings. An external AXI
-Clock Converter in the APB branch would be functionally valid, but unnecessary
-because no control transaction needs to enter the 200 MHz domain first.
+the different AXI-Lite and S2MM/SG clocks and configures the DMA IP in
+asynchronous clock mode. Its single external `axi_resetn` is driven by the
+slower 100 MHz control reset; the DMA IP handles its internal reset crossings.
+An external AXI Clock Converter in the APB branch would be functionally valid,
+but unnecessary because no control transaction needs to enter the 200 MHz
+domain first.
+
+Finite multi-frame capture enables AXI DMA scatter-gather with a 23-bit length
+field. `M_AXI_S2MM` writes payload slots and `M_AXI_SG` fetches descriptors;
+both are independent SmartConnect inputs sharing the existing HP0 DDR port.
+Linux pre-arms one descriptor per frame before issuing a single stream `START`.
+The optional AXI DMA control/status streams are explicitly disabled. They are
+intended for sideband-aware packet systems such as Ethernet and are not part of
+Q-Crate's `S_AXIS_S2MM` data contract.
 
 ## APB canary bitstream
 

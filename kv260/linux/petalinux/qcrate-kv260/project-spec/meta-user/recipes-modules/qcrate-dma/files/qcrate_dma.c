@@ -4,9 +4,10 @@
  *
  * This driver owns the Q-Crate stream-control registers and one AXI DMA S2MM
  * channel. It allocates a DMA-coherent capture buffer and exposes a small
- * ioctl/mmap ABI through /dev/qcrate-dma. Userspace requests a frame and reads
- * the completed buffer; it never programs AXI DMA registers, handles physical
- * addresses, or performs cache maintenance.
+ * ioctl/mmap ABI through /dev/qcrate-dma. Userspace requests one frame or a
+ * finite scatter-gather frame chain and reads the completed buffer; it never
+ * programs AXI DMA registers, handles physical addresses, or performs cache
+ * maintenance.
  *
  * The critical transaction order is:
  *   reset stream -> configure frame -> arm S2MM -> start stream -> wait
@@ -29,6 +30,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/overflow.h>
 #include <linux/platform_device.h>
 #include <linux/sizes.h>
 #include <linux/string.h>
@@ -78,6 +80,7 @@ struct qcrate_dma_dev {
 	dma_addr_t buffer_dma;
 	size_t buffer_bytes;
 	u32 max_transfer_bytes;
+	bool has_sg;
 
 	/* One in-flight transaction and one userspace owner are allowed. */
 	struct completion completion;
@@ -85,6 +88,18 @@ struct qcrate_dma_dev {
 	struct mutex capture_lock;
 	atomic_t opened;
 	struct miscdevice miscdev;
+};
+
+/* Internal result shared by the stable single- and multi-frame UAPIs. */
+struct qcrate_capture_result {
+	u32 transferred_bytes;
+	u32 last_residue_bytes;
+	u32 dma_result;
+	u32 stream_status;
+	u32 completed_frames;
+	u32 current_frame_id;
+	u32 current_sample_index;
+	u32 stall_cycles;
 };
 
 /* DMAEngine invokes this callback from its tasklet after S2MM completion. */
@@ -144,74 +159,91 @@ static int qcrate_reset_stream(struct qcrate_dma_dev *qdma)
 }
 
 /*
- * Execute one finite-frame capture while holding capture_lock. The coherent
- * buffer remains allocated for the device lifetime and is reused per request.
+ * Execute one finite stream command into consecutive frame slots. With SG
+ * enabled, all DMA descriptors are submitted before START, so Linux is absent
+ * from the frame-to-frame data path.
  */
-static int qcrate_capture(struct qcrate_dma_dev *qdma,
-			  struct qcrate_dma_capture *capture)
+static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
+			      u32 frame_length_words, u32 frame_count,
+			      u32 *timeout_ms,
+			      struct qcrate_capture_result *result)
 {
 	struct dma_async_tx_descriptor *desc;
 	dma_cookie_t cookie;
 	unsigned long wait_result;
-	size_t transfer_bytes;
+	size_t frame_bytes;
+	size_t total_bytes;
+	u32 frame;
 	u32 status;
+	bool descriptors_submitted = false;
 	int ret;
 
-	if (!capture->frame_length_words)
+	if (!frame_length_words || !frame_count)
+		return -EINVAL;
+	if (frame_count > QCRATE_DMA_MAX_CHAIN_FRAMES)
+		return -E2BIG;
+	if (frame_count > 1 && !qdma->has_sg)
+		return -EOPNOTSUPP;
+
+	if (!*timeout_ms)
+		*timeout_ms = QCRATE_DEFAULT_TIMEOUT_MS;
+	if (*timeout_ms > QCRATE_MAX_TIMEOUT_MS)
 		return -EINVAL;
 
-	if (!capture->timeout_ms)
-		capture->timeout_ms = QCRATE_DEFAULT_TIMEOUT_MS;
-	if (capture->timeout_ms > QCRATE_MAX_TIMEOUT_MS)
-		return -EINVAL;
-
-	transfer_bytes = (size_t)capture->frame_length_words *
-			 QCRATE_STREAM_WORD_BYTES;
-	if (transfer_bytes > qdma->buffer_bytes ||
-	    transfer_bytes > qdma->max_transfer_bytes)
+	if (check_mul_overflow((size_t)frame_length_words,
+			       (size_t)QCRATE_STREAM_WORD_BYTES, &frame_bytes) ||
+	    check_mul_overflow(frame_bytes, (size_t)frame_count, &total_bytes))
+		return -EOVERFLOW;
+	if (frame_bytes > qdma->max_transfer_bytes ||
+	    total_bytes > qdma->buffer_bytes)
 		return -EMSGSIZE;
 
 	ret = mutex_lock_interruptible(&qdma->capture_lock);
 	if (ret)
 		return ret;
 
-	ret = dmaengine_terminate_sync(qdma->rx_chan);
+	ret = qcrate_reset_stream(qdma);
 	if (ret)
 		goto out_unlock;
 
-	ret = qcrate_reset_stream(qdma);
-	if (ret)
-		goto out_terminate;
-
 	/* Poisoning makes a missing or short DMA write obvious during verification. */
-	memset(qdma->buffer, 0xa5, transfer_bytes);
+	memset(qdma->buffer, 0xa5, total_bytes);
 	reinit_completion(&qdma->completion);
 	qdma->result.result = DMA_TRANS_ABORTED;
-	qdma->result.residue = transfer_bytes;
+	qdma->result.residue = frame_bytes;
 
-	/* Program one finite pattern frame and clear stale Q-Crate IRQ status. */
+	/* Program one finite pattern sequence and clear stale Q-Crate IRQ status. */
 	iowrite32(0, qdma->regs + QCRATE_STREAM_CONTROL);
-	iowrite32(capture->frame_length_words,
+	iowrite32(frame_length_words,
 		  qdma->regs + QCRATE_STREAM_FRAME_LENGTH);
-	iowrite32(1, qdma->regs + QCRATE_STREAM_FRAME_COUNT);
+	iowrite32(frame_count, qdma->regs + QCRATE_STREAM_FRAME_COUNT);
 	iowrite32(0, qdma->regs + QCRATE_STREAM_MODE);
 	iowrite32(0, qdma->regs + QCRATE_STREAM_IRQ_ENABLE);
 	iowrite32(0x3, qdma->regs + QCRATE_STREAM_IRQ_CLEAR);
 
-	desc = dmaengine_prep_slave_single(qdma->rx_chan, qdma->buffer_dma,
-					   transfer_bytes, DMA_DEV_TO_MEM,
-					   DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
-	if (!desc) {
-		ret = -EIO;
-		goto out_reset;
-	}
+	for (frame = 0; frame < frame_count; frame++) {
+		unsigned long flags = DMA_CTRL_ACK;
 
-	desc->callback_result = qcrate_dma_complete;
-	desc->callback_param = qdma;
-	cookie = dmaengine_submit(desc);
-	ret = dma_submit_error(cookie);
-	if (ret)
-		goto out_reset;
+		if (frame == frame_count - 1)
+			flags |= DMA_PREP_INTERRUPT;
+		desc = dmaengine_prep_slave_single(
+			qdma->rx_chan, qdma->buffer_dma + frame * frame_bytes,
+			frame_bytes, DMA_DEV_TO_MEM, flags);
+		if (!desc) {
+			ret = -EIO;
+			goto out_reset;
+		}
+
+		if (frame == frame_count - 1) {
+			desc->callback_result = qcrate_dma_complete;
+			desc->callback_param = qdma;
+		}
+		cookie = dmaengine_submit(desc);
+		ret = dma_submit_error(cookie);
+		if (ret)
+			goto out_reset;
+		descriptors_submitted = true;
+	}
 
 	/* Arm S2MM first; START may assert AXI4-Stream TVALID immediately. */
 	dma_async_issue_pending(qdma->rx_chan);
@@ -219,7 +251,7 @@ static int qcrate_capture(struct qcrate_dma_dev *qdma,
 		  qdma->regs + QCRATE_STREAM_CONTROL);
 
 	wait_result = wait_for_completion_interruptible_timeout(
-		&qdma->completion, msecs_to_jiffies(capture->timeout_ms));
+		&qdma->completion, msecs_to_jiffies(*timeout_ms));
 	if (!wait_result) {
 		ret = -ETIMEDOUT;
 		goto out_stop;
@@ -234,43 +266,87 @@ static int qcrate_capture(struct qcrate_dma_dev *qdma,
 		goto out_stop;
 
 	/* Return both DMAEngine and APB-domain evidence to userspace. */
-	capture->residue_bytes = min_t(u32, qdma->result.residue,
-					 transfer_bytes);
-	capture->transferred_bytes = transfer_bytes - capture->residue_bytes;
-	capture->dma_result = qdma->result.result;
-	capture->stream_status = status;
-	capture->completed_frames = ioread32(
+	result->last_residue_bytes = min_t(u32, qdma->result.residue,
+					    frame_bytes);
+	result->dma_result = qdma->result.result;
+	result->stream_status = status;
+	result->completed_frames = ioread32(
 		qdma->regs + QCRATE_STREAM_COMPLETED_FRAMES);
-	capture->current_frame_id = ioread32(
+	result->current_frame_id = ioread32(
 		qdma->regs + QCRATE_STREAM_CURRENT_FRAME_ID);
-	capture->current_sample_index = ioread32(
+	result->current_sample_index = ioread32(
 		qdma->regs + QCRATE_STREAM_CURRENT_SAMPLE);
-	capture->stall_cycles = ioread32(
+	result->stall_cycles = ioread32(
 		qdma->regs + QCRATE_STREAM_STALL_CYCLES);
 
-	if (capture->dma_result != DMA_TRANS_NOERROR ||
-	    capture->residue_bytes ||
-	    !(capture->stream_status & QCRATE_STATUS_DONE) ||
-	    (capture->stream_status & QCRATE_STATUS_ERROR) ||
-	    capture->completed_frames != 1) {
+	if (result->dma_result != DMA_TRANS_NOERROR ||
+	    result->last_residue_bytes ||
+	    !(result->stream_status & QCRATE_STATUS_DONE) ||
+	    (result->stream_status & QCRATE_STATUS_ERROR) ||
+	    result->completed_frames != frame_count ||
+	    result->current_frame_id != frame_count - 1 ||
+	    result->current_sample_index != frame_length_words - 1) {
 		dev_err(qdma->dev,
-			"capture failed: dma=%u residue=%u status=0x%08x frames=%u\n",
-			capture->dma_result, capture->residue_bytes,
-			capture->stream_status, capture->completed_frames);
+			"capture failed: dma=%u residue=%u status=0x%08x frames=%u/%u frame=%u sample=%u\n",
+			result->dma_result, result->last_residue_bytes,
+			result->stream_status, result->completed_frames, frame_count,
+			result->current_frame_id, result->current_sample_index);
 		ret = -EIO;
 		goto out_reset;
 	}
 
+	result->transferred_bytes = total_bytes;
 	ret = 0;
 	goto out_unlock;
 
 out_stop:
 out_reset:
 	qcrate_reset_stream(qdma);
-out_terminate:
-	dmaengine_terminate_sync(qdma->rx_chan);
+	if (descriptors_submitted)
+		dmaengine_terminate_sync(qdma->rx_chan);
 out_unlock:
 	mutex_unlock(&qdma->capture_lock);
+	return ret;
+}
+
+/* Preserve the original one-frame ioctl by translating it internally. */
+static int qcrate_capture(struct qcrate_dma_dev *qdma,
+			  struct qcrate_dma_capture *capture)
+{
+	struct qcrate_capture_result result = { };
+	int ret;
+
+	ret = qcrate_run_capture(qdma, capture->frame_length_words, 1,
+				 &capture->timeout_ms, &result);
+	capture->transferred_bytes = result.transferred_bytes;
+	capture->residue_bytes = result.last_residue_bytes;
+	capture->dma_result = result.dma_result;
+	capture->stream_status = result.stream_status;
+	capture->completed_frames = result.completed_frames;
+	capture->current_frame_id = result.current_frame_id;
+	capture->current_sample_index = result.current_sample_index;
+	capture->stall_cycles = result.stall_cycles;
+	return ret;
+}
+
+/* Implement the finite pre-armed SG-chain ioctl. */
+static int qcrate_capture_frames(struct qcrate_dma_dev *qdma,
+				 struct qcrate_dma_capture_frames *capture)
+{
+	struct qcrate_capture_result result = { };
+	int ret;
+
+	ret = qcrate_run_capture(qdma, capture->frame_length_words,
+				 capture->frame_count, &capture->timeout_ms,
+				 &result);
+	capture->transferred_bytes = result.transferred_bytes;
+	capture->last_residue_bytes = result.last_residue_bytes;
+	capture->dma_result = result.dma_result;
+	capture->stream_status = result.stream_status;
+	capture->completed_frames = result.completed_frames;
+	capture->current_frame_id = result.current_frame_id;
+	capture->current_sample_index = result.current_sample_index;
+	capture->stall_cycles = result.stall_cycles;
 	return ret;
 }
 
@@ -281,11 +357,18 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 	struct qcrate_dma_dev *qdma = file->private_data;
 	void __user *user_arg = (void __user *)argument;
 	struct qcrate_dma_capture capture;
+	struct qcrate_dma_capture_frames capture_frames;
 	struct qcrate_dma_info info = {
 		.abi_version = QCRATE_DMA_ABI_VERSION,
 		.buffer_bytes = qdma->buffer_bytes,
 		.max_transfer_bytes = qdma->max_transfer_bytes,
 		.stream_word_bytes = QCRATE_STREAM_WORD_BYTES,
+	};
+	struct qcrate_dma_caps caps = {
+		.abi_version = QCRATE_DMA_ABI_VERSION,
+		.feature_flags = qdma->has_sg ? QCRATE_DMA_CAP_SG_CHAIN : 0,
+		.max_chain_frames = qdma->has_sg ?
+			QCRATE_DMA_MAX_CHAIN_FRAMES : 1,
 	};
 	int ret;
 
@@ -303,6 +386,25 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 
 		ret = qcrate_capture(qdma, &capture);
 		if (copy_to_user(user_arg, &capture, sizeof(capture)))
+			return -EFAULT;
+		return ret;
+
+	case QCRATE_DMA_IOC_GET_CAPS:
+		if (copy_to_user(user_arg, &caps, sizeof(caps)))
+			return -EFAULT;
+		return 0;
+
+	case QCRATE_DMA_IOC_CAPTURE_FRAMES:
+		if (copy_from_user(&capture_frames, user_arg,
+				   sizeof(capture_frames)))
+			return -EFAULT;
+		if (memchr_inv(capture_frames.reserved, 0,
+			       sizeof(capture_frames.reserved)))
+			return -EINVAL;
+
+		ret = qcrate_capture_frames(qdma, &capture_frames);
+		if (copy_to_user(user_arg, &capture_frames,
+				 sizeof(capture_frames)))
 			return -EFAULT;
 		return ret;
 
@@ -372,6 +474,19 @@ static u32 qcrate_max_transfer_bytes(struct dma_chan *channel)
 	return (1U << width) - 1U;
 }
 
+/* The generated AXI DMA node records whether the deployed IP includes SG. */
+static bool qcrate_dma_has_sg(struct dma_chan *channel)
+{
+	struct device_node *node = dmaengine_get_dma_device(channel)->of_node;
+	u32 include_sg;
+
+	if (!node)
+		return false;
+	if (!of_property_read_u32(node, "xlnx,include-sg", &include_sg))
+		return include_sg != 0;
+	return of_property_read_bool(node, "xlnx,include-sg");
+}
+
 /* Acquire clocks and the DMA provider before the first potentially unsafe APB read. */
 static int qcrate_dma_probe(struct platform_device *pdev)
 {
@@ -413,6 +528,7 @@ static int qcrate_dma_probe(struct platform_device *pdev)
 
 	qdma->dma_dev = dmaengine_get_dma_device(qdma->rx_chan);
 	qdma->max_transfer_bytes = qcrate_max_transfer_bytes(qdma->rx_chan);
+	qdma->has_sg = qcrate_dma_has_sg(qdma->rx_chan);
 
 	of_property_read_u32(pdev->dev.of_node, "qcrate,buffer-bytes",
 			     &buffer_bytes);
@@ -447,8 +563,9 @@ static int qcrate_dma_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, qdma);
 	dev_info(&pdev->dev,
-		 "ready: buffer=%zu bytes, maximum transfer=%u bytes\n",
-		 qdma->buffer_bytes, qdma->max_transfer_bytes);
+		 "ready: buffer=%zu bytes, maximum transfer=%u bytes, SG=%s\n",
+		 qdma->buffer_bytes, qdma->max_transfer_bytes,
+		 qdma->has_sg ? "enabled" : "disabled");
 	return 0;
 
 free_buffer:

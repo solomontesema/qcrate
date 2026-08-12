@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -21,6 +22,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PETALINUX_DIR = SCRIPT_DIR.parent
 REPO_ROOT = SCRIPT_DIR.parents[3]
 PROJECT_DIR = PETALINUX_DIR / "qcrate-kv260"
+PROJECT_PL_DTSI = PROJECT_DIR / "project-spec" / "configs" / "pl.dtsi"
+PROJECT_WORKSPACE = PROJECT_DIR / "components" / "plnx_workspace"
+PROJECT_WORKSPACE_BACKUP = PROJECT_DIR / "components" / \
+    "plnx_workspace.qcrate-previous"
 IMAGES_DIR = PROJECT_DIR / "images" / "linux"
 XSA_FILE = REPO_ROOT / "build" / "artifacts" / "qcrate_kv260.xsa"
 SDT_DIR = REPO_ROOT / "build" / "petalinux" / "sdt" / "qcrate-kv260"
@@ -153,19 +158,48 @@ class Flow:
                     backup.rename(SDT_DIR)
                 raise
 
-        self.command(
-            ["petalinux-config", "--get-hw-description", SDT_DIR, "--silentconfig"],
-            cwd=PROJECT_DIR,
-            env=self.petalinux_env,
-        )
-        self.command(
-            ["petalinux-config", "--silentconfig"],
-            cwd=PROJECT_DIR,
-            env=self.petalinux_env,
-        )
-        if not self.dry_run:
-            self.audit_sdt(SDT_DIR)
-            self.audit_project_config()
+        previous_pl_dtsi = None
+        workspace_saved = False
+        try:
+            if not self.dry_run:
+                if PROJECT_PL_DTSI.exists():
+                    previous_pl_dtsi = PROJECT_PL_DTSI.read_bytes()
+                    PROJECT_PL_DTSI.unlink()
+                if PROJECT_WORKSPACE_BACKUP.exists():
+                    if PROJECT_WORKSPACE.exists():
+                        shutil.rmtree(PROJECT_WORKSPACE_BACKUP)
+                    else:
+                        PROJECT_WORKSPACE_BACKUP.rename(PROJECT_WORKSPACE)
+                if PROJECT_WORKSPACE.exists():
+                    PROJECT_WORKSPACE.rename(PROJECT_WORKSPACE_BACKUP)
+                    workspace_saved = True
+            self.command(
+                ["petalinux-config", "--get-hw-description", SDT_DIR,
+                 "--silentconfig"],
+                cwd=PROJECT_DIR,
+                env=self.petalinux_env,
+            )
+            self.command(
+                ["petalinux-config", "--silentconfig"],
+                cwd=PROJECT_DIR,
+                env=self.petalinux_env,
+            )
+            if not self.dry_run:
+                self.audit_sdt(SDT_DIR)
+                self.audit_project_overlay()
+                self.audit_project_config()
+                if workspace_saved:
+                    shutil.rmtree(PROJECT_WORKSPACE_BACKUP)
+        except Exception:
+            if not self.dry_run:
+                PROJECT_PL_DTSI.unlink(missing_ok=True)
+                if previous_pl_dtsi is not None:
+                    PROJECT_PL_DTSI.parent.mkdir(parents=True, exist_ok=True)
+                    PROJECT_PL_DTSI.write_bytes(previous_pl_dtsi)
+                shutil.rmtree(PROJECT_WORKSPACE, ignore_errors=True)
+                if workspace_saved:
+                    PROJECT_WORKSPACE_BACKUP.rename(PROJECT_WORKSPACE)
+            raise
 
     def find_bsp(self) -> Path:
         if self.args.bsp is not None:
@@ -243,6 +277,41 @@ class Flow:
         ):
             if value not in pl_text:
                 raise FlowError(f"SDT PL description is missing {description}")
+
+        sg_contract = (
+            (r"xlnx,include-sg\s*(?:;|=\s*<\s*(?:0x)?0*1\s*>)",
+             "enabled AXI DMA scatter-gather"),
+            (r"xlnx,sg-length-width\s*=\s*<\s*(?:23|0x0*17)\s*>",
+             "23-bit AXI DMA SG length"),
+            (r"xlnx,sg-include-stscntrl-strm\s*=\s*<\s*(?:0x)?0+\s*>",
+             "disabled AXI DMA control/status stream"),
+        )
+        for pattern, description in sg_contract:
+            if re.search(pattern, pl_text) is None:
+                raise FlowError(f"SDT PL description is missing {description}")
+
+    @staticmethod
+    def audit_project_overlay() -> None:
+        Flow.require_file(PROJECT_PL_DTSI, "PetaLinux-generated PL overlay")
+        overlay = PROJECT_PL_DTSI.read_text(
+            encoding="utf-8", errors="replace"
+        ).lower()
+        required = (
+            (r"/plugin/\s*;", "device-tree plugin declaration"),
+            (r'firmware-name\s*=\s*"qcrate_kv260\.bit\.bin"',
+             "Q-Crate FPGA firmware name"),
+            (r"xlnx,include-sg\s*(?:;|=\s*<\s*(?:0x)?0*1\s*>)",
+             "enabled AXI DMA scatter-gather"),
+            (r"xlnx,sg-length-width\s*=\s*<\s*(?:23|0x0*17)\s*>",
+             "23-bit AXI DMA SG length"),
+            (r"xlnx,sg-include-stscntrl-strm\s*=\s*<\s*(?:0x)?0+\s*>",
+             "disabled AXI DMA control/status stream"),
+        )
+        for pattern, description in required:
+            if re.search(pattern, overlay) is None:
+                raise FlowError(
+                    f"PetaLinux-generated PL overlay is missing {description}"
+                )
 
     @staticmethod
     def audit_project_config() -> None:

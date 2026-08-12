@@ -45,6 +45,7 @@ PetaLinux plus Vitis platform.
 | Kria Ubuntu/`xmutil` package | Closed experiment | Learn bitstream plus device-tree-overlay deployment | No |
 | Fixed PetaLinux boot platform | Complete | Boot the matching bitstream, PS clocks, and static device tree | Yes |
 | Linux DMAEngine capture | Complete | Move stream frames into coherent DDR buffers and verify every word | Yes |
+| Finite SG multi-frame capture | Complete | Pre-arm framed buffers and receive increasing frame IDs from one stream start | Yes |
 | PetaLinux plus Vitis applications | Intended deliverable | Integrate A53 Linux and later R5/OpenAMP software | Yes |
 
 Closed experiments remain documented because their commands and failure modes

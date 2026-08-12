@@ -25,7 +25,7 @@ deliverable.
 ## Status
 
 ```text
-Current gate: fixed PetaLinux platform and Linux DMAEngine capture accepted
+Current gate: fixed platform and one-frame DMA accepted; finite SG chain active
 Accepted project: qcrate-kv260, based on the KV260 Starter Kit SDT BSP
 Boot policy: XSA-matched QSPI boot chain plus FPGA Manager full-overlay loading
 Validated here: Update 1, BSP, XSA-to-SDT import, platform build, WIC packaging,
@@ -900,7 +900,13 @@ DMA node at 0xA0000000
 
 `project-spec/configs/pl.dtsi` is generated and ignored. The source of truth is
 the XSA plus checked-in PetaLinux configuration, not a hand-edited generated
-overlay.
+overlay. `petalinux_flow.py configure` transactionally invalidates both the
+generated `components/plnx_workspace` and the copied overlay before hardware
+import. This forces Lopper to regenerate the full plugin overlay from the new
+SDT instead of reporting `Specified workspace already set up, leaving as-is`
+and retaining an older hardware description. The script audits the regenerated
+firmware name and DMA SG contract and restores both previous artifacts if
+import fails.
 
 ## First image build and deployment
 

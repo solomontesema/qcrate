@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import mmap
 import os
@@ -15,9 +16,12 @@ from pathlib import Path
 DEVICE = Path("/dev/qcrate-dma")
 ABI_VERSION = 1
 DMA_TRANS_NOERROR = 0
+CAP_SG_CHAIN = 1 << 0
 
 INFO_STRUCT = struct.Struct("<8I")
 CAPTURE_STRUCT = struct.Struct("<16I")
+CAPS_STRUCT = struct.Struct("<8I")
+CAPTURE_FRAMES_STRUCT = struct.Struct("<16I")
 WORD_STRUCT = struct.Struct("<I")
 
 IOC_NRBITS = 8
@@ -42,6 +46,10 @@ def ioctl_code(direction: int, number: int, size: int) -> int:
 
 IOC_GET_INFO = ioctl_code(IOC_READ, 0x00, INFO_STRUCT.size)
 IOC_CAPTURE = ioctl_code(IOC_READ | IOC_WRITE, 0x01, CAPTURE_STRUCT.size)
+IOC_GET_CAPS = ioctl_code(IOC_READ, 0x02, CAPS_STRUCT.size)
+IOC_CAPTURE_FRAMES = ioctl_code(
+    IOC_READ | IOC_WRITE, 0x03, CAPTURE_FRAMES_STRUCT.size
+)
 
 
 @dataclass(frozen=True)
@@ -57,11 +65,37 @@ class DeviceInfo:
 
 
 @dataclass(frozen=True)
+class DeviceCaps:
+    abi_version: int
+    feature_flags: int
+    max_chain_frames: int
+
+    @property
+    def has_sg_chain(self) -> bool:
+        return bool(self.feature_flags & CAP_SG_CHAIN)
+
+
+@dataclass(frozen=True)
 class CaptureResult:
     frame_length_words: int
     timeout_ms: int
     transferred_bytes: int
     residue_bytes: int
+    dma_result: int
+    stream_status: int
+    completed_frames: int
+    current_frame_id: int
+    current_sample_index: int
+    stall_cycles: int
+
+
+@dataclass(frozen=True)
+class CaptureFramesResult:
+    frame_length_words: int
+    frame_count: int
+    timeout_ms: int
+    transferred_bytes: int
+    last_residue_bytes: int
     dma_result: int
     stream_status: int
     completed_frames: int
@@ -86,10 +120,37 @@ def get_info(fd: int) -> DeviceInfo:
     return info
 
 
+def get_caps(fd: int) -> DeviceCaps:
+    raw = bytearray(CAPS_STRUCT.size)
+    try:
+        fcntl.ioctl(fd, IOC_GET_CAPS, raw, True)
+    except OSError as exc:
+        if exc.errno == errno.ENOTTY:
+            return DeviceCaps(ABI_VERSION, 0, 1)
+        raise
+    values = CAPS_STRUCT.unpack(raw)
+    caps = DeviceCaps(*values[:3])
+    if caps.abi_version != ABI_VERSION:
+        raise RuntimeError(
+            f"driver ABI {caps.abi_version}, tool requires ABI {ABI_VERSION}"
+        )
+    return caps
+
+
 def request_capture(fd: int, words: int, timeout_ms: int) -> CaptureResult:
     raw = bytearray(CAPTURE_STRUCT.pack(words, timeout_ms, *([0] * 14)))
     fcntl.ioctl(fd, IOC_CAPTURE, raw, True)
     return CaptureResult(*CAPTURE_STRUCT.unpack(raw)[:10])
+
+
+def request_capture_frames(
+    fd: int, words: int, frames: int, timeout_ms: int
+) -> CaptureFramesResult:
+    raw = bytearray(
+        CAPTURE_FRAMES_STRUCT.pack(words, frames, timeout_ms, *([0] * 13))
+    )
+    fcntl.ioctl(fd, IOC_CAPTURE_FRAMES, raw, True)
+    return CaptureFramesResult(*CAPTURE_FRAMES_STRUCT.unpack(raw)[:11])
 
 
 def verify_pattern(buffer: mmap.mmap, words: int) -> None:
@@ -105,12 +166,34 @@ def verify_pattern(buffer: mmap.mmap, words: int) -> None:
             )
 
 
-def print_info(info: DeviceInfo) -> None:
+def verify_frames(buffer: mmap.mmap, words: int, frames: int) -> None:
+    for frame_id in range(frames):
+        frame_offset = frame_id * words
+        for sample_index in range(words):
+            word_index = frame_offset + sample_index
+            actual = WORD_STRUCT.unpack_from(
+                buffer, word_index * WORD_STRUCT.size
+            )[0]
+            expected = ((frame_id & 0xFFFF) << 16) | (sample_index & 0xFFFF)
+            if actual != expected:
+                actual_frame = actual >> 16
+                actual_sample = actual & 0xFFFF
+                raise RuntimeError(
+                    f"word {word_index}: expected 0x{expected:08x} "
+                    f"(frame={frame_id}, sample={sample_index}), "
+                    f"got 0x{actual:08x} "
+                    f"(frame={actual_frame}, sample={actual_sample})"
+                )
+
+
+def print_info(info: DeviceInfo, caps: DeviceCaps) -> None:
     print(f"ABI version        : {info.abi_version}")
     print(f"coherent buffer    : {info.buffer_bytes} bytes")
     print(f"DMA transfer limit : {info.max_transfer_bytes} bytes")
     print(f"stream word        : {info.stream_word_bytes} bytes")
     print(f"maximum frame      : {info.max_frame_words} words")
+    print(f"SG frame chaining  : {'yes' if caps.has_sg_chain else 'no'}")
+    print(f"maximum SG frames  : {caps.max_chain_frames}")
     if info.max_frame_words < 4096:
         print("NOTE: the current 14-bit AXI DMA length field limits frames to 4095 words")
 
@@ -118,7 +201,7 @@ def print_info(info: DeviceInfo) -> None:
 def command_info(device: Path) -> None:
     fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
     try:
-        print_info(get_info(fd))
+        print_info(get_info(fd), get_caps(fd))
     finally:
         os.close(fd)
 
@@ -183,6 +266,95 @@ def command_capture(
         os.close(fd)
 
 
+def command_capture_frames(
+    device: Path,
+    requested_words: int | None,
+    frames: int,
+    timeout_ms: int,
+    repeat: int,
+    output: Path | None,
+) -> None:
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        info = get_info(fd)
+        caps = get_caps(fd)
+        if not caps.has_sg_chain:
+            raise RuntimeError("driver or deployed AXI DMA does not support SG chaining")
+
+        words = (
+            min(4096, info.max_frame_words)
+            if requested_words is None
+            else requested_words
+        )
+        if words < 1 or words > info.max_frame_words:
+            raise ValueError(
+                f"--words must be between 1 and {info.max_frame_words}, got {words}"
+            )
+        max_buffer_frames = info.buffer_bytes // (words * WORD_STRUCT.size)
+        max_frames = min(caps.max_chain_frames, max_buffer_frames)
+        if frames < 2 or frames > max_frames:
+            raise ValueError(
+                f"--frames must be between 2 and {max_frames} for {words} words, "
+                f"got {frames}"
+            )
+        if repeat < 1:
+            raise ValueError(f"--repeat must be positive, got {repeat}")
+
+        total_words = words * frames
+        total_bytes = total_words * WORD_STRUCT.size
+        with mmap.mmap(
+            fd,
+            info.buffer_bytes,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ,
+        ) as buffer:
+            result = None
+            for iteration in range(1, repeat + 1):
+                result = request_capture_frames(fd, words, frames, timeout_ms)
+                if result.dma_result != DMA_TRANS_NOERROR:
+                    raise RuntimeError(f"DMA result code {result.dma_result}")
+                if result.transferred_bytes != total_bytes:
+                    raise RuntimeError(
+                        f"transferred {result.transferred_bytes} bytes, "
+                        f"expected {total_bytes}"
+                    )
+                if result.last_residue_bytes:
+                    raise RuntimeError(
+                        f"last descriptor residue is {result.last_residue_bytes} bytes"
+                    )
+                if result.completed_frames != frames:
+                    raise RuntimeError(
+                        f"stream completed {result.completed_frames} frames, "
+                        f"expected {frames}"
+                    )
+                verify_frames(buffer, words, frames)
+                if repeat > 1:
+                    print(
+                        f"OK  chain {iteration}/{repeat}: "
+                        f"{frames} frames x {words} words"
+                    )
+
+            assert result is not None
+            first = WORD_STRUCT.unpack_from(buffer, 0)[0]
+            last = WORD_STRUCT.unpack_from(buffer, (total_words - 1) * 4)[0]
+            print(
+                f"PASS {repeat} chain(s), {frames} frames x {words} words; "
+                "every word verified"
+            )
+            print(f"first/last         : 0x{first:08x} / 0x{last:08x}")
+            print(f"stream status      : 0x{result.stream_status:08x}")
+            print(f"completed frames   : {result.completed_frames}")
+            print(f"final frame/sample : {result.current_frame_id} / "
+                  f"{result.current_sample_index}")
+            print(f"stall cycles       : {result.stall_cycles}")
+
+            if output is not None:
+                output.write_bytes(buffer[:total_bytes])
+                print(f"wrote               : {output}")
+    finally:
+        os.close(fd)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=Path, default=DEVICE)
@@ -206,6 +378,27 @@ def parse_args() -> argparse.Namespace:
         help="repeat independent one-frame captures",
     )
     capture.add_argument("--output", type=Path, help="write the final frame as binary")
+
+    capture_frames = subparsers.add_parser(
+        "capture-frames",
+        help="capture one finite pre-armed scatter-gather frame chain",
+    )
+    capture_frames.add_argument(
+        "--words",
+        type=int,
+        help="words per frame (default: min(4096, hardware limit))",
+    )
+    capture_frames.add_argument("--frames", type=int, default=8)
+    capture_frames.add_argument("--timeout-ms", type=int, default=1000)
+    capture_frames.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="repeat complete multi-frame chains",
+    )
+    capture_frames.add_argument(
+        "--output", type=Path, help="write the final complete chain as binary"
+    )
     return parser.parse_args()
 
 
@@ -218,6 +411,15 @@ def main() -> int:
             command_capture(
                 args.device,
                 args.words,
+                args.timeout_ms,
+                args.repeat,
+                args.output,
+            )
+        elif args.command == "capture-frames":
+            command_capture_frames(
+                args.device,
+                args.words,
+                args.frames,
                 args.timeout_ms,
                 args.repeat,
                 args.output,
