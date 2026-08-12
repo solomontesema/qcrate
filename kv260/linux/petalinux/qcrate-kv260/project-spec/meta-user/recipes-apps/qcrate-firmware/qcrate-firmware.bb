@@ -10,6 +10,7 @@ PACKAGE_ARCH = "${MACHINE_ARCH}"
 FILESEXTRAPATHS:prepend := "${THISDIR}/../../../configs:"
 SRC_URI = "file://pl.dtsi \
            file://qcrate-clock-parents.dtsi \
+           file://qcrate-dma-client.dtsi \
           "
 
 S = "${WORKDIR}"
@@ -19,6 +20,7 @@ QCRATE_SDT_DIR = "${RECIPE_SYSROOT}${datadir}/sdt/${MACHINE}"
 QCRATE_BIT = "${QCRATE_SDT_DIR}/qcrate_kv260.bit"
 QCRATE_PL_DTSI = "${WORKDIR}/pl.dtsi"
 QCRATE_CLOCK_PARENTS_DTSI = "${WORKDIR}/qcrate-clock-parents.dtsi"
+QCRATE_DMA_CLIENT_DTSI = "${WORKDIR}/qcrate-dma-client.dtsi"
 QCRATE_COMBINED_PL_DTS = "${B}/qcrate-pl.dts"
 
 do_configure[dirs] = "${B}"
@@ -27,9 +29,11 @@ do_configure() {
     test -s ${QCRATE_BIT}
     test -s ${QCRATE_PL_DTSI}
     test -s ${QCRATE_CLOCK_PARENTS_DTSI}
+    test -s ${QCRATE_DMA_CLIENT_DTSI}
 
     printf 'all:\n{\n  %s\n}\n' "${QCRATE_BIT}" > ${B}/qcrate_kv260.bif
     cat ${QCRATE_PL_DTSI} ${QCRATE_CLOCK_PARENTS_DTSI} \
+        ${QCRATE_DMA_CLIENT_DTSI} \
         > ${QCRATE_COMBINED_PL_DTS}
 }
 

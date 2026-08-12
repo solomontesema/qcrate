@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Capture and verify Q-Crate AXI4-Stream frames through DMAEngine."""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import mmap
+import os
+import struct
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+
+DEVICE = Path("/dev/qcrate-dma")
+ABI_VERSION = 1
+DMA_TRANS_NOERROR = 0
+
+INFO_STRUCT = struct.Struct("<8I")
+CAPTURE_STRUCT = struct.Struct("<16I")
+WORD_STRUCT = struct.Struct("<I")
+
+IOC_NRBITS = 8
+IOC_TYPEBITS = 8
+IOC_SIZEBITS = 14
+IOC_NRSHIFT = 0
+IOC_TYPESHIFT = IOC_NRSHIFT + IOC_NRBITS
+IOC_SIZESHIFT = IOC_TYPESHIFT + IOC_TYPEBITS
+IOC_DIRSHIFT = IOC_SIZESHIFT + IOC_SIZEBITS
+IOC_WRITE = 1
+IOC_READ = 2
+
+
+def ioctl_code(direction: int, number: int, size: int) -> int:
+    return (
+        (direction << IOC_DIRSHIFT)
+        | (ord("Q") << IOC_TYPESHIFT)
+        | (number << IOC_NRSHIFT)
+        | (size << IOC_SIZESHIFT)
+    )
+
+
+IOC_GET_INFO = ioctl_code(IOC_READ, 0x00, INFO_STRUCT.size)
+IOC_CAPTURE = ioctl_code(IOC_READ | IOC_WRITE, 0x01, CAPTURE_STRUCT.size)
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    abi_version: int
+    buffer_bytes: int
+    max_transfer_bytes: int
+    stream_word_bytes: int
+
+    @property
+    def max_frame_words(self) -> int:
+        return min(self.buffer_bytes, self.max_transfer_bytes) // self.stream_word_bytes
+
+
+@dataclass(frozen=True)
+class CaptureResult:
+    frame_length_words: int
+    timeout_ms: int
+    transferred_bytes: int
+    residue_bytes: int
+    dma_result: int
+    stream_status: int
+    completed_frames: int
+    current_frame_id: int
+    current_sample_index: int
+    stall_cycles: int
+
+
+def get_info(fd: int) -> DeviceInfo:
+    raw = bytearray(INFO_STRUCT.size)
+    fcntl.ioctl(fd, IOC_GET_INFO, raw, True)
+    values = INFO_STRUCT.unpack(raw)
+    info = DeviceInfo(*values[:4])
+    if info.abi_version != ABI_VERSION:
+        raise RuntimeError(
+            f"driver ABI {info.abi_version}, tool requires ABI {ABI_VERSION}"
+        )
+    if info.stream_word_bytes != WORD_STRUCT.size:
+        raise RuntimeError(
+            f"driver stream word is {info.stream_word_bytes} bytes, expected 4"
+        )
+    return info
+
+
+def request_capture(fd: int, words: int, timeout_ms: int) -> CaptureResult:
+    raw = bytearray(CAPTURE_STRUCT.pack(words, timeout_ms, *([0] * 14)))
+    fcntl.ioctl(fd, IOC_CAPTURE, raw, True)
+    return CaptureResult(*CAPTURE_STRUCT.unpack(raw)[:10])
+
+
+def verify_pattern(buffer: mmap.mmap, words: int) -> None:
+    for sample_index in range(words):
+        actual = WORD_STRUCT.unpack_from(buffer, sample_index * WORD_STRUCT.size)[0]
+        expected = sample_index & 0xFFFF
+        if actual != expected:
+            frame_id = actual >> 16
+            sample = actual & 0xFFFF
+            raise RuntimeError(
+                f"word {sample_index}: expected 0x{expected:08x}, "
+                f"got 0x{actual:08x} (frame={frame_id}, sample={sample})"
+            )
+
+
+def print_info(info: DeviceInfo) -> None:
+    print(f"ABI version        : {info.abi_version}")
+    print(f"coherent buffer    : {info.buffer_bytes} bytes")
+    print(f"DMA transfer limit : {info.max_transfer_bytes} bytes")
+    print(f"stream word        : {info.stream_word_bytes} bytes")
+    print(f"maximum frame      : {info.max_frame_words} words")
+    if info.max_frame_words < 4096:
+        print("NOTE: the current 14-bit AXI DMA length field limits frames to 4095 words")
+
+
+def command_info(device: Path) -> None:
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        print_info(get_info(fd))
+    finally:
+        os.close(fd)
+
+
+def command_capture(
+    device: Path,
+    requested_words: int | None,
+    timeout_ms: int,
+    repeat: int,
+    output: Path | None,
+) -> None:
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        info = get_info(fd)
+        words = (
+            min(4096, info.max_frame_words)
+            if requested_words is None
+            else requested_words
+        )
+        if words < 1 or words > info.max_frame_words:
+            raise ValueError(
+                f"--words must be between 1 and {info.max_frame_words}, got {words}"
+            )
+        if repeat < 1:
+            raise ValueError(f"--repeat must be positive, got {repeat}")
+
+        with mmap.mmap(
+            fd,
+            info.buffer_bytes,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ,
+        ) as buffer:
+            result = None
+            for iteration in range(1, repeat + 1):
+                result = request_capture(fd, words, timeout_ms)
+                if result.dma_result != DMA_TRANS_NOERROR:
+                    raise RuntimeError(f"DMA result code {result.dma_result}")
+                if result.transferred_bytes != words * WORD_STRUCT.size:
+                    raise RuntimeError(
+                        f"transferred {result.transferred_bytes} bytes, "
+                        f"expected {words * WORD_STRUCT.size}"
+                    )
+                if result.residue_bytes:
+                    raise RuntimeError(f"DMA residue is {result.residue_bytes} bytes")
+                verify_pattern(buffer, words)
+                if repeat > 1:
+                    print(f"OK  capture {iteration}/{repeat}: {words} words")
+
+            assert result is not None
+            first = WORD_STRUCT.unpack_from(buffer, 0)[0]
+            last = WORD_STRUCT.unpack_from(buffer, (words - 1) * 4)[0]
+            print(f"PASS {repeat} capture(s), {words} words each; every word verified")
+            print(f"first/last         : 0x{first:08x} / 0x{last:08x}")
+            print(f"stream status      : 0x{result.stream_status:08x}")
+            print(f"completed frames   : {result.completed_frames}")
+            print(f"stall cycles       : {result.stall_cycles}")
+
+            if output is not None:
+                output.write_bytes(buffer[: words * WORD_STRUCT.size])
+                print(f"wrote               : {output}")
+    finally:
+        os.close(fd)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device", type=Path, default=DEVICE)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("info", help="show the driver ABI and buffer limits")
+
+    capture = subparsers.add_parser(
+        "capture", help="capture one or more independent one-frame transfers"
+    )
+    capture.add_argument(
+        "--words",
+        type=int,
+        help="words per frame (default: min(4096, hardware limit))",
+    )
+    capture.add_argument("--timeout-ms", type=int, default=1000)
+    capture.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="repeat independent one-frame captures",
+    )
+    capture.add_argument("--output", type=Path, help="write the final frame as binary")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        if args.command == "info":
+            command_info(args.device)
+        elif args.command == "capture":
+            command_capture(
+                args.device,
+                args.words,
+                args.timeout_ms,
+                args.repeat,
+                args.output,
+            )
+        else:
+            raise AssertionError(args.command)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

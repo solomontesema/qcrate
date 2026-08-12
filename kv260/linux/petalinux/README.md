@@ -25,13 +25,14 @@ deliverable.
 ## Status
 
 ```text
-Current gate: fixed PetaLinux platform accepted; proceed to Linux DMA
+Current gate: fixed PetaLinux platform and Linux DMAEngine capture accepted
 Accepted project: qcrate-kv260, based on the KV260 Starter Kit SDT BSP
 Boot policy: XSA-matched QSPI boot chain plus FPGA Manager full-overlay loading
 Validated here: Update 1, BSP, XSA-to-SDT import, platform build, WIC packaging,
                 persistent rootfs, single PL owner, Q-Crate full-overlay load,
                 A/B firmware update, 200/100 MHz clocks, APB smoke/dump,
-                automated clean-SD deployment, and staged target acceptance
+                automated clean-SD deployment, staged target acceptance, and
+                100 consecutive fully verified DMA captures
 ```
 
 The accepted source project is `qcrate-kv260/`. It selects the
@@ -230,6 +231,11 @@ The first PetaLinux milestone is complete only when all of these are true:
 DMA is intentionally outside this first acceptance gate. Boot and control-path
 correctness must be stable before adding DMA buffer ownership, cache coherency,
 and driver questions.
+
+The next milestone is implemented and maintained separately in
+[`../dma/README.md`](../dma/README.md). It adds a receive-only DMAEngine client,
+a coherent kernel buffer, and a userspace verifier without weakening this
+fixed-platform acceptance boundary.
 
 ## Stage 2: software platform deliverable
 
@@ -1523,6 +1529,21 @@ sudo sh -c "grep -E 'pl[01]_ref' /sys/kernel/debug/clk/clk_summary"
 The prior Ubuntu investigation proved that an APB access with an absent PL
 clock can stall the AXI transaction and freeze the A53. Service success and
 clock rates are therefore preconditions, not optional diagnostics.
+
+If the loader reports `Failed to apply Overlay`, compare the overlay fixups
+with the symbols exported by the base DT before debugging FPGA logic:
+
+```bash
+fdtdump /boot/system.dtb 2>/dev/null | sed -n '/__symbols__ {/,/};/p'
+fdtdump /lib/firmware/xilinx/base/pl.dtbo 2>/dev/null | \
+  sed -n '/__fixups__ {/,/};/p'
+```
+
+The deployed KV260 base DT exports `amba = "/axi"`, but not `amba_pl`. Runtime
+PL additions must therefore target `&amba`. The `amba_pl` label seen in raw SDT
+source is not available to the kernel overlay resolver. This distinction first
+surfaced when the DMAEngine client node was added: targeting `&amba_pl` made the
+entire overlay fail before any Linux driver probe or APB transaction.
 
 ## Complete command summary
 

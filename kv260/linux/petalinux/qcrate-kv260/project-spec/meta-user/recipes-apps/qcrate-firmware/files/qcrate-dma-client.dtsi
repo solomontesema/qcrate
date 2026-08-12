@@ -1,0 +1,20 @@
+/*
+ * The AXI DMA controller is generated in pl.dtsi, so its DMAEngine client
+ * must be part of the same full PL overlay. AXI DMA channel 1 is S2MM.
+ *
+ * A runtime overlay must target a symbol exported by the live base DT. The
+ * KV260 base DT exports `amba` for /axi; `amba_pl` exists only as an SDT source
+ * label and therefore cannot be resolved when configfs applies this overlay.
+ */
+&amba {
+	qcrate_dma: qcrate-dma@a0010000 {
+		compatible = "qcrate,dma-capture-1.0";
+		reg = <0x0 0xa0010000 0x0 0x10000>;
+		clocks = <&zynqmp_clk 71>, <&zynqmp_clk 72>;
+		clock-names = "stream", "control";
+		dmas = <&axi_dma_0 1>;
+		dma-names = "rx";
+		qcrate,buffer-bytes = <0x00100000>;
+		status = "okay";
+	};
+};

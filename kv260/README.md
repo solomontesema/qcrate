@@ -43,7 +43,8 @@ PetaLinux plus Vitis platform.
 | Vivado Tcl/RTL build | Active | Reproduce the hardware and export the XSA | Yes |
 | Direct FPGA Manager/`fpgautil` load | Closed experiment | Learn the lowest-level runtime bitstream path | No |
 | Kria Ubuntu/`xmutil` package | Closed experiment | Learn bitstream plus device-tree-overlay deployment | No |
-| Fixed PetaLinux boot platform | Next | Boot the matching bitstream, PS clocks, and static device tree | Yes |
+| Fixed PetaLinux boot platform | Complete | Boot the matching bitstream, PS clocks, and static device tree | Yes |
+| Linux DMAEngine capture | Complete | Move stream frames into coherent DDR buffers and verify every word | Yes |
 | PetaLinux plus Vitis applications | Intended deliverable | Integrate A53 Linux and later R5/OpenAMP software | Yes |
 
 Closed experiments remain documented because their commands and failure modes
@@ -93,7 +94,9 @@ software architecture.
 
 - `hw/README.md`: RTL simulation, Vivado diagnostics, clocks, resets, and ILA.
 - `linux/README.md`: completed Kria Ubuntu, FPGA Manager, and `xmutil` chapter.
-- `linux/petalinux/README.md`: next fixed-platform bring-up and its relationship
-  to the final Vitis platform.
+- `linux/petalinux/README.md`: accepted fixed-platform bring-up and its
+  relationship to the final Vitis platform.
+- `linux/dma/README.md`: DMAEngine driver, coherent capture buffer, userspace
+  verification, and target diagnostics.
 - `../docs/ARCHITECTURE.md`: system architecture and hardware data/control paths.
 - `../PLANS.md`: active implementation checklist.
