@@ -35,8 +35,9 @@ static void usage(FILE *stream, const char *program)
 		"Commands:\n"
 		"  ping [nonce]          round-trip a 32-bit value\n"
 		"  info                  read Q-Crate identity through R5-0\n"
+		"  stats                 read R5 uptime and request counters\n"
 		"  scratch-test [value]  write, verify, and restore SYS.SCRATCH\n"
-		"  test                  run ping, info, and scratch-test\n",
+		"  test                  run ping, info, scratch-test, and stats\n",
 		program);
 }
 
@@ -259,6 +260,30 @@ static int run_scratch_test(int file_descriptor, int timeout_ms, uint32_t value)
 	return 0;
 }
 
+static int run_stats(int file_descriptor, int timeout_ms)
+{
+	struct qcrate_rpmsg_message message;
+	uint64_t uptime_ms;
+
+	init_request(&message, QCRATE_CMD_GET_R5_STATS);
+	if (exchange_message(file_descriptor, timeout_ms, &message) != 0)
+		return -1;
+	if (message.payload_words != 4U || message.payload[1] == 0U) {
+		fprintf(stderr, "qcrate-control: invalid R5 statistics response\n");
+		return -1;
+	}
+
+	uptime_ms = (uint64_t)message.payload[0] * UINT64_C(1000) /
+		    message.payload[1];
+	printf("R5 uptime ticks : %" PRIu32 "\n", message.payload[0]);
+	printf("tick rate       : %" PRIu32 " Hz\n", message.payload[1]);
+	printf("accepted        : %" PRIu32 "\n", message.payload[2]);
+	printf("rejected        : %" PRIu32 "\n", message.payload[3]);
+	printf("uptime          : %" PRIu64 ".%03" PRIu64 " seconds\n",
+	       uptime_ms / UINT64_C(1000), uptime_ms % UINT64_C(1000));
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	const char *device = NULL;
@@ -324,6 +349,8 @@ int main(int argc, char **argv)
 			status = run_ping(file_descriptor, timeout_ms, argument);
 	} else if (strcmp(command, "info") == 0 && index == argc) {
 		status = run_info(file_descriptor, timeout_ms);
+	} else if (strcmp(command, "stats") == 0 && index == argc) {
+		status = run_stats(file_descriptor, timeout_ms);
 	} else if (strcmp(command, "scratch-test") == 0) {
 		argument = UINT32_C(0xA5A55A5A);
 		if (index < argc && parse_u32(argv[index++], &argument) != 0)
@@ -337,7 +364,8 @@ int main(int argc, char **argv)
 			     UINT32_C(0x51435250)) != 0 ||
 		    run_info(file_descriptor, timeout_ms) != 0 ||
 		    run_scratch_test(file_descriptor, timeout_ms,
-				     UINT32_C(0xA5A55A5A)) != 0)
+				     UINT32_C(0xA5A55A5A)) != 0 ||
+		    run_stats(file_descriptor, timeout_ms) != 0)
 			status = -1;
 		else
 			printf("PASS Q-Crate OpenAMP vertical slice\n");

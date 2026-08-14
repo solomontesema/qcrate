@@ -164,9 +164,37 @@ Every request and response is exactly 64 bytes and contains:
 | `PING` | one nonce word | the same nonce |
 | `GET_INFO` | empty | device ID, version, build ID, capabilities, stream clock, control clock |
 | `SCRATCH_TEST` | one test value | original, requested, readback, restore target, restored readback |
+| `GET_R5_STATS` | empty | tick count, tick rate, accepted requests, rejected requests |
 
 Both processors are little-endian. Any future cross-endian target must add
 explicit wire conversion without changing the existing ABI silently.
+
+### Worked extension: R5 service statistics
+
+The `qcrate-control stats` extension is the reference example for adding a
+bounded control feature across the existing OpenAMP transport:
+
+1. `common/protocol/qcrate_protocol.h` assigns command ID 4 while preserving
+   the fixed 64-byte ABI.
+2. `qcrate_rpmsg_service.c` validates the empty request, reads the FreeRTOS tick
+   counter and configured tick rate, and returns service counters.
+3. `qcrate_control.c` creates the request, validates the four-word response,
+   and formats uptime using integer arithmetic.
+4. `vitis_flow.py all` copies the tracked protocol and R5 service into the
+   generated application, builds the ELF, and stages the ELF and Linux inputs
+   for the Yocto recipe.
+
+An accepted request is any callback that produces `QCRATE_STATUS_OK`; all
+other callbacks are rejected. The statistics request includes itself. The
+counters describe requests processed by R5, regardless of whether sending the
+response later succeeds, wrap modulo 2^32, and reset when Linux remoteproc
+reloads the R5 firmware. The FreeRTOS tick count also wraps according to
+`TickType_t`; this diagnostic reports current firmware uptime, not wall-clock
+time.
+
+This extension requires no XSA, device-tree, kernel, carveout, endpoint-name,
+or Yocto recipe change. Those layers establish transport and lifecycle. A new
+command changes only the shared application protocol and its two endpoints.
 
 ## Reserved-memory contract
 
@@ -276,6 +304,7 @@ done
 sudo qcrate-control ping 0x12345678
 sudo qcrate-control info
 sudo qcrate-control scratch-test 0xa5a55a5a
+sudo qcrate-control stats
 sudo qcrate-control test
 ```
 
@@ -288,6 +317,10 @@ PASS ping 0x12345678
 DEVICE_ID       : 0x51435254
 stream clock    : 200000000 Hz
 control clock   : 100000000 Hz
+R5 uptime ticks : 123456
+tick rate       : 1000 Hz
+accepted        : 4
+rejected        : 0
 PASS Q-Crate OpenAMP vertical slice
 ```
 

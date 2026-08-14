@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "FreeRTOS.h"
+#include "task.h"
 #include "xil_io.h"
 
 #include <metal/log.h>
@@ -33,8 +35,13 @@
 
 #define QCRATE_INFO_WORDS           6U
 #define QCRATE_SCRATCH_RESULT_WORDS 5U
+#define QCRATE_R5_STATS_WORDS       4U
 
 static struct rpmsg_endpoint qcrate_endpoint;
+
+/* AMD's OpenAMP polling task serializes endpoint callback execution. */
+static uint32_t qcrate_accepted_requests;
+static uint32_t qcrate_rejected_requests;
 
 static uint32_t qcrate_reg_read(uint32_t offset)
 {
@@ -119,6 +126,21 @@ static void qcrate_handle_scratch_test(
 		response->status = QCRATE_STATUS_SCRATCH_VERIFY;
 }
 
+static void qcrate_handle_get_r5_stats(
+	const struct qcrate_rpmsg_message *request,
+	struct qcrate_rpmsg_message *response)
+{
+	if (request->payload_words != 0U) {
+		response->status = QCRATE_STATUS_BAD_LENGTH;
+		return;
+	}
+
+	response->payload_words = QCRATE_R5_STATS_WORDS;
+	response->payload[0] = (uint32_t)xTaskGetTickCount();
+	response->payload[1] = (uint32_t)configTICK_RATE_HZ;
+	/* The callback fills counters after accounting for this request. */
+}
+
 static void qcrate_handle_request(const struct qcrate_rpmsg_message *request,
 				  struct qcrate_rpmsg_message *response)
 {
@@ -147,6 +169,9 @@ static void qcrate_handle_request(const struct qcrate_rpmsg_message *request,
 	case QCRATE_CMD_SCRATCH_TEST:
 		qcrate_handle_scratch_test(request, response);
 		break;
+	case QCRATE_CMD_GET_R5_STATS:
+		qcrate_handle_get_r5_stats(request, response);
+		break;
 	default:
 		response->status = QCRATE_STATUS_BAD_COMMAND;
 		break;
@@ -172,6 +197,17 @@ static int qcrate_endpoint_cb(struct rpmsg_endpoint *endpoint, void *data,
 	} else {
 		memcpy(&request, data, sizeof(request));
 		qcrate_handle_request(&request, &response);
+	}
+
+	if (response.status == QCRATE_STATUS_OK)
+		qcrate_accepted_requests++;
+	else
+		qcrate_rejected_requests++;
+
+	if (response.status == QCRATE_STATUS_OK &&
+	    response.command == QCRATE_CMD_GET_R5_STATS) {
+		response.payload[2] = qcrate_accepted_requests;
+		response.payload[3] = qcrate_rejected_requests;
 	}
 
 	if (rpmsg_send(endpoint, &response, sizeof(response)) < 0)
