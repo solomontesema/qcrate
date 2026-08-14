@@ -1,0 +1,119 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+set -eu
+
+SERVICE_NAME="qcrate-control"
+FIRMWARE_NAME="qcrate/qcrate-r5.elf"
+
+find_r5_0()
+{
+	for remoteproc in /sys/class/remoteproc/remoteproc*; do
+		[ -r "$remoteproc/name" ] || continue
+		case "$(cat "$remoteproc/name")" in
+			*r5f@0*|*r5f_0*)
+				printf '%s\n' "$remoteproc"
+				return 0
+				;;
+		esac
+	done
+	return 1
+}
+
+find_channel()
+{
+	for channel in /sys/bus/rpmsg/devices/*; do
+		[ -r "$channel/name" ] || continue
+		[ "$(cat "$channel/name")" = "$SERVICE_NAME" ] || continue
+		printf '%s\n' "$channel"
+		return 0
+	done
+	return 1
+}
+
+wait_for_channel()
+{
+	count=0
+	while [ "$count" -lt 100 ]; do
+		if find_channel; then
+			return 0
+		fi
+		count=$((count + 1))
+		sleep 0.1
+	done
+	return 1
+}
+
+wait_for_endpoint()
+{
+	count=0
+	while [ "$count" -lt 100 ]; do
+		for endpoint in /sys/class/rpmsg/rpmsg*; do
+			[ -r "$endpoint/name" ] || continue
+			[ "$(cat "$endpoint/name")" = "$SERVICE_NAME" ] && return 0
+		done
+		count=$((count + 1))
+		sleep 0.1
+	done
+	return 1
+}
+
+start_r5()
+{
+	modprobe zynqmp_r5_remoteproc
+	modprobe virtio_rpmsg_bus
+	modprobe rpmsg_ns
+	modprobe rpmsg_ctrl
+	modprobe rpmsg_char
+
+	remoteproc="$(find_r5_0)" || {
+		echo "qcrate-r5-remoteproc: R5-0 remoteproc device not found" >&2
+		return 1
+	}
+
+	state="$(cat "$remoteproc/state")"
+	if [ "$state" = "running" ]; then
+		loaded="$(cat "$remoteproc/firmware")"
+		if [ "$loaded" != "$FIRMWARE_NAME" ]; then
+			echo "qcrate-r5-remoteproc: R5-0 already runs $loaded" >&2
+			return 1
+		fi
+	else
+		printf '%s' "$FIRMWARE_NAME" >"$remoteproc/firmware"
+		printf '%s' start >"$remoteproc/state"
+	fi
+
+	channel="$(wait_for_channel)" || {
+		echo "qcrate-r5-remoteproc: RPMsg channel was not announced" >&2
+		return 1
+	}
+
+	if [ ! -L "$channel/driver" ]; then
+		printf '%s' rpmsg_chrdev >"$channel/driver_override"
+		basename "$channel" > /sys/bus/rpmsg/drivers/rpmsg_chrdev/bind
+	fi
+
+	wait_for_endpoint || {
+		echo "qcrate-r5-remoteproc: rpmsg_char endpoint was not created" >&2
+		return 1
+	}
+}
+
+stop_r5()
+{
+	remoteproc="$(find_r5_0)" || return 0
+	[ "$(cat "$remoteproc/state")" = "running" ] || return 0
+	printf '%s' stop >"$remoteproc/state"
+}
+
+case "${1:-}" in
+	start)
+		start_r5
+		;;
+	stop)
+		stop_r5
+		;;
+	*)
+		echo "usage: qcrate-r5-remoteproc {start|stop}" >&2
+		exit 2
+		;;
+esac

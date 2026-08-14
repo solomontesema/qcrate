@@ -1,0 +1,46 @@
+/*
+ * Linux OpenAMP uses IPI 7 as the A53-side endpoint because the default APU
+ * IPI is reserved for platform-management communication.  The base SDT has
+ * the controllers, but this XSA does not describe their mutual channels.
+ * Vitis 2024.2 validates both stock ZynqMP RPU channels while generating an
+ * OpenAMP application, even when the selected application domain is R5-0.
+ */
+&ipi7 {
+	status = "okay";
+
+	qcrate_ipi7_to_rpu0: child@1 {
+		xlnx,ipi-bitmask = <0x100>;
+		xlnx,ipi-rsp-msg-buf = <0xff990620>;
+		xlnx,ipi-id = <1>;
+		xlnx,ipi-buf-index = <0>;
+		xlnx,ipi-req-msg-buf = <0xff990600>;
+	};
+
+	qcrate_ipi7_to_rpu1: child@2 {
+		xlnx,ipi-bitmask = <0x200>;
+		xlnx,ipi-rsp-msg-buf = <0xff990660>;
+		xlnx,ipi-id = <2>;
+		xlnx,ipi-buf-index = <1>;
+		xlnx,ipi-req-msg-buf = <0xff990640>;
+	};
+};
+
+&ipi2 {
+	qcrate_ipi2_to_pl0: child@7 {
+		xlnx,ipi-bitmask = <0x1000000>;
+		xlnx,ipi-rsp-msg-buf = <0xff9902e0>;
+		xlnx,ipi-id = <7>;
+		xlnx,ipi-buf-index = <3>;
+		xlnx,ipi-req-msg-buf = <0xff9902c0>;
+	};
+};
+
+&ipi1 {
+	qcrate_ipi1_to_pl0: child@7 {
+		xlnx,ipi-bitmask = <0x1000000>;
+		xlnx,ipi-rsp-msg-buf = <0xff9900e0>;
+		xlnx,ipi-id = <7>;
+		xlnx,ipi-buf-index = <3>;
+		xlnx,ipi-req-msg-buf = <0xff9900c0>;
+	};
+};

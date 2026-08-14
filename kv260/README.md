@@ -28,7 +28,7 @@ PetaLinux platform
         v
 Vitis platform
   - A53 Linux application
-  - later R5 FreeRTOS/OpenAMP application
+  - R5 FreeRTOS/OpenAMP application
 ```
 
 The PetaLinux stage is not throwaway work. Its initial APB-only bring-up is a
@@ -46,6 +46,7 @@ PetaLinux plus Vitis platform.
 | Fixed PetaLinux boot platform | Complete | Boot the matching bitstream, PS clocks, and static device tree | Yes |
 | Linux DMAEngine capture | Complete | Move stream frames into coherent DDR buffers and verify every word | Yes |
 | Finite SG multi-frame capture | Complete | Pre-arm framed buffers and receive increasing frame IDs from one stream start | Yes |
+| R5 FreeRTOS/OpenAMP vertical slice | Complete | Linux remoteproc/RPMsg control service with bounded R5 APB diagnostics | Yes |
 | PetaLinux plus Vitis applications | Intended deliverable | Integrate A53 Linux and later R5/OpenAMP software | Yes |
 
 Closed experiments remain documented because their commands and failure modes
@@ -85,7 +86,7 @@ Q-Crate deliberately progresses through increasingly complete software paths:
    access.
 4. DMA buffer ownership and cache coherency are handled by a kernel-supported
    interface.
-5. Vitis packages the A53 Linux application and later R5 FreeRTOS/OpenAMP
+5. Vitis packages the A53 Linux application and R5 FreeRTOS/OpenAMP
    firmware against the same platform definition.
 
 Passing an early stage does not make its diagnostic access method the final
@@ -99,5 +100,9 @@ software architecture.
   relationship to the final Vitis platform.
 - `linux/dma/README.md`: DMAEngine driver, coherent capture buffer, userspace
   verification, and target diagnostics.
+- `linux/network/README.md`: wired topology, addressing, throughput baseline,
+  packet capture, and recorded network acceptance evidence.
+- `linux/openamp/README.md`: R5-0 FreeRTOS, Linux remoteproc, VirtIO RPMsg,
+  shared protocol, reproducible Vitis flow, and board acceptance.
 - `../docs/ARCHITECTURE.md`: system architecture and hardware data/control paths.
 - `../PLANS.md`: active implementation checklist.

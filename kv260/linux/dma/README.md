@@ -488,9 +488,54 @@ independent 4096-word captures, an 8-frame chain ending at `0x00070fff`, a
 64-frame chain ending at `0x003f0fff`, and 100 repeated 8-frame chains without
 timeouts, stale data, loss, duplication, or frame-order errors.
 
-The next DMA extension after acceptance is cyclic producer/consumer buffering
-with sustained throughput and overrun accounting. It should not be started
-until finite buffer ownership and SG framing are proven on the board.
+## Deferred sustained-acquisition architectures
+
+Finite SG capture is sufficient for the current triggered-shot workflow and is
+the permanent regression interface. Q-Crate will proceed to OpenAMP, sequencing,
+DSP, and UDP before adding another DMA ownership model. The UDP milestone must
+measure whether capture and transmission can meet the selected operating point;
+only that evidence should reopen this decision.
+
+The maximum synthetic source rate is deliberately a stress case rather than a
+system requirement:
+
+```text
+200 MHz x 32 bits      = 800 MB/s
+4096-word frame        = 16 KiB every 20.48 us
+maximum frame rate     = 48,828 frames/s
+current 1 MiB buffer   = 64 frames, or about 1.31 ms at maximum rate
+```
+
+A 1 GbE link cannot continuously transport an 800 MB/s producer. No finite
+buffer can repair a permanent rate mismatch; the eventual design must use an
+appropriate sample rate, decimation, duty-cycled shots, backpressure, or an
+explicit drop policy. The Q-Crate pattern source can pause safely on `TREADY`.
+A real unthrottleable ADC would additionally require PL elasticity and a defined
+overflow response.
+
+The following alternatives were discussed and intentionally retained:
+
+| Option | Appropriate use | Main benefit | Main cost or risk | Current decision |
+| --- | --- | --- | --- | --- |
+| Synchronous finite SG | Triggered shots and diagnostics | Proven ownership, recovery, and complete-buffer verification | Capture and userspace processing do not overlap | Accepted baseline |
+| Asynchronous finite-SG bank pool | Overlapped capture, processing, and UDP without silent overwrite | Explicit `FREE -> FILLING -> READY -> USER_OWNED -> FREE` ownership; can use `poll()` and read-only `mmap()` | Inter-batch rearming gap; several banks provide only milliseconds at the stress rate | Recommended first extension if UDP measurements require overlap |
+| DMAEngine cyclic ring | Truly gapless, audio-like sustained acquisition | No software rearming at ring wrap | DMA may overwrite unread data; torn-read prevention, period callbacks, interrupt rate, and coalescing require careful design | Deferred experiment, not the default production path |
+| Linux IIO buffered device | A later real ADC/DDC instrument with channels, triggers, and timestamps | Standard Linux acquisition ABI and ecosystem | Framework integration is premature for the current pattern/shot model | Reconsider when real IQ channels exist |
+| Custom AXI DMA ring provider | A measured requirement unsupported by `xilinx_dma` | Full descriptor, tail-pointer, and interrupt control | Reimplements vendor DMA ownership and recovery with substantial maintenance risk | Rejected unless DMAEngine is proven inadequate |
+
+The exact Xilinx 2024.2 `xilinx_dma` provider advertises `DMA_CYCLIC` and
+implements `dmaengine_prep_dma_cyclic()`. That confirms feasibility, not system
+correctness. At one callback per 4096-word frame, the stress case approaches
+48,828 callbacks per second, while the current ring wraps in about 1.31 ms.
+Period sizing, interrupt coalescing, overwrite detection, userspace ownership,
+and stop/recovery behavior would therefore require explicit characterization.
+
+If the asynchronous finite-SG bank pool is selected later, preserve the current
+synchronous ioctls and add a separate API with `START`, `DEQUEUE`, `RELEASE`,
+`STATUS`, and `STOP`. Required counters include produced and consumed batches,
+consumer-starvation events, bytes, elapsed time, stream stalls, and recovery
+events. A free-bank shortage should pause before starting a new finite batch;
+it is not a DMA overrun and must not be reported as one.
 
 ## References
 

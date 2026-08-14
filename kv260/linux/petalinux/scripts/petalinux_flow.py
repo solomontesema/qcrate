@@ -41,12 +41,16 @@ DEFAULT_BSP_DIR = PETALINUX_DIR / "KV260_BSP_DOWLOADED"
 REQUIRED_ROOTFS_FILES = {
     "./usr/bin/image_update",
     "./usr/bin/qcrate-apb",
+    "./usr/bin/qcrate-control",
     "./usr/bin/qcrate-first-boot",
     "./usr/bin/qcrate-load-pl",
+    "./usr/bin/qcrate-r5-remoteproc",
     "./usr/bin/xmutil",
+    "./usr/lib/firmware/qcrate/qcrate-r5.elf",
     "./usr/lib/firmware/xilinx/base/pl.dtbo",
     "./usr/lib/firmware/xilinx/base/qcrate_kv260.bit.bin",
     "./usr/lib/systemd/system/qcrate-pl-load.service",
+    "./usr/lib/systemd/system/qcrate-r5.service",
 }
 
 
@@ -320,6 +324,7 @@ class Flow:
             "CONFIG_SUBSYSTEM_FPGA_MANAGER=y",
             "CONFIG_SUBSYSTEM_PL_DT_OVERLAY_FULL=y",
             "CONFIG_SUBSYSTEM_ROOTFS_EXT4=y",
+            "CONFIG_YOCTO_BBMC_CORTEXR5_0_FREERTOS=y",
         )
         for setting in required:
             if setting not in config:

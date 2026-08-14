@@ -10,5 +10,6 @@
   "artifact_dir": "build/artifacts",
   "jobs": 4,
   "vivado": "vivado",
-  "vivado_settings": "/tools/Xilinx/Vivado/2024.2/settings64.sh"
+  "vivado_settings": "/tools/Xilinx/Vivado/2024.2/settings64.sh",
+  "vitis_settings": "/tools/Xilinx/Vitis/2024.2/settings64.sh"
 }

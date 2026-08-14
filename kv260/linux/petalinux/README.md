@@ -1777,3 +1777,10 @@ Expected board results are masked `dfx-mgr.service`, disabled
 `pl1_ref=100000000`, FPGA Manager `operating`, overlay `applied`,
 `DEVICE_ID=0x51435254`, and `PASS qcrate_apb_smoke` without any `xmutil` or
 manual `fpgautil` command.
+
+## R5 FreeRTOS/OpenAMP extension
+
+The fixed platform now has a separately documented heterogeneous-control
+extension. See `../openamp/README.md` before building it: the R5 ELF must be
+generated and staged by the Vitis flow before BitBake can build the
+`qcrate-openamp` recipe.

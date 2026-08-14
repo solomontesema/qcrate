@@ -1,0 +1,17 @@
+[Unit]
+Description=Start the Q-Crate R5-0 FreeRTOS OpenAMP service
+Requires=qcrate-pl-load.service
+After=qcrate-pl-load.service local-fs.target
+Before=multi-user.target
+ConditionPathExists=/lib/firmware/qcrate/qcrate-r5.elf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/qcrate-r5-remoteproc start
+ExecStop=/usr/bin/qcrate-r5-remoteproc stop
+RemainAfterExit=yes
+TimeoutStartSec=20
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
