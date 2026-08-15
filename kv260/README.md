@@ -104,5 +104,5 @@ software architecture.
   packet capture, and recorded network acceptance evidence.
 - `linux/openamp/README.md`: R5-0 FreeRTOS, Linux remoteproc, VirtIO RPMsg,
   shared protocol, reproducible Vitis flow, and board acceptance.
-- `../docs/ARCHITECTURE.md`: system architecture and hardware data/control paths.
-- `../PLANS.md`: active implementation checklist.
+- `../common/sequence/README.md`: deterministic sequence binary contract.
+- `../host/sequence_compiler/README.md`: host-side sequence compiler and tests.
