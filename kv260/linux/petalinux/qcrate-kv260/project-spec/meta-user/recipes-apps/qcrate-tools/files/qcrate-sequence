@@ -1,0 +1,558 @@
+#!/usr/bin/env python3
+"""Load and control deterministic Q-Crate pulse sequences through APB."""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import mmap
+import os
+import struct
+import sys
+import time
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+
+
+APB_BASE = 0xA001_0000
+APB_SIZE = 0x0001_0000
+FPGA_FIRMWARE_NAME = "qcrate_kv260.bit.bin"
+FPGA_FIRMWARE_NAME_PATH = "/proc/device-tree/fpga-region/firmware-name"
+STREAM_CLOCK_HZ = 200_000_000
+CONTROL_CLOCK_HZ = 100_000_000
+CLOCK_RATE_TOLERANCE_HZ = 1_000
+CLOCK_RATE_PATHS = (
+    ("pl_clk0", "/sys/devices/platform/axi/axi:clocking0/set_rate", STREAM_CLOCK_HZ),
+    ("pl_clk1", "/sys/devices/platform/axi/axi:clocking1/set_rate", CONTROL_CLOCK_HZ),
+)
+
+MAGIC = b"QSEQ"
+FORMAT_VERSION = 1
+MIN_EVENTS = 2
+MAX_EVENTS = 128
+OUTPUT_MASK = 0x3
+HEADER = struct.Struct("<4sHHIIIIQ")
+EVENT = struct.Struct("<QII")
+WORD = struct.Struct("<I")
+
+SEQUENCE_BASE = 0x2000
+SEQ_CONTROL = SEQUENCE_BASE + 0x000
+SEQ_STATUS = SEQUENCE_BASE + 0x004
+SEQ_EVENT_COUNT = SEQUENCE_BASE + 0x008
+SEQ_ACTIVE_EVENT = SEQUENCE_BASE + 0x00C
+SEQ_COMPLETED_SHOTS = SEQUENCE_BASE + 0x010
+SEQ_FAULT_INFO = SEQUENCE_BASE + 0x014
+SEQ_TIMEBASE_LO = SEQUENCE_BASE + 0x018
+SEQ_TIMEBASE_HI = SEQUENCE_BASE + 0x01C
+SEQ_START_TIME_LO = SEQUENCE_BASE + 0x020
+SEQ_START_TIME_HI = SEQUENCE_BASE + 0x024
+SEQ_ELAPSED_LO = SEQUENCE_BASE + 0x028
+SEQ_ELAPSED_HI = SEQUENCE_BASE + 0x02C
+SEQ_EVENT_MEMORY = SEQUENCE_BASE + 0x800
+
+CONTROL_ARM = 1 << 0
+CONTROL_START = 1 << 1
+CONTROL_ABORT = 1 << 2
+CONTROL_SOFT_RESET = 1 << 3
+CONTROL_EXTERNAL_TRIGGER_ENABLE = 1 << 8
+
+STATUS_IDLE = 1 << 0
+STATUS_VALIDATING = 1 << 1
+STATUS_ARMED = 1 << 2
+STATUS_BUSY = 1 << 3
+STATUS_FAULTED = 1 << 4
+STATUS_COMMAND_BUSY = 1 << 8
+STATUS_MEMORY_LOCKED = 1 << 9
+
+FAULT_NAMES = {
+    0: "none",
+    1: "bad event count",
+    2: "timestamps are not strictly increasing",
+    3: "reserved output-state bits are nonzero",
+    4: "reserved flags are nonzero",
+    5: "event does not change output state",
+    6: "final event does not restore safe state",
+    7: "event-memory underflow",
+    8: "event-memory response protocol error",
+    9: "illegal command for current state",
+}
+
+
+class SequenceError(ValueError):
+    """Raised when a sequence image or hardware state is invalid."""
+
+
+@dataclass(frozen=True)
+class SequenceEvent:
+    timestamp: int
+    output_state: int
+    flags: int
+
+
+@dataclass(frozen=True)
+class SequenceImage:
+    events: tuple[SequenceEvent, ...]
+    payload: bytes
+    crc32: int
+
+
+@dataclass(frozen=True)
+class SequenceStatus:
+    raw: int
+    event_count: int
+    active_event: int
+    completed_shots: int
+    fault_code: int
+    fault_event: int
+    timebase: int
+    start_time: int
+    elapsed_ticks: int
+
+    @property
+    def idle(self) -> bool:
+        return bool(self.raw & STATUS_IDLE)
+
+    @property
+    def validating(self) -> bool:
+        return bool(self.raw & STATUS_VALIDATING)
+
+    @property
+    def armed(self) -> bool:
+        return bool(self.raw & STATUS_ARMED)
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.raw & STATUS_BUSY)
+
+    @property
+    def faulted(self) -> bool:
+        return bool(self.raw & STATUS_FAULTED)
+
+    @property
+    def command_busy(self) -> bool:
+        return bool(self.raw & STATUS_COMMAND_BUSY)
+
+    @property
+    def memory_locked(self) -> bool:
+        return bool(self.raw & STATUS_MEMORY_LOCKED)
+
+
+class DevMem32:
+    def __init__(self, base: int, size: int) -> None:
+        if sys.byteorder != "little":
+            raise RuntimeError("Q-Crate MMIO tools require a little-endian CPU")
+        if base % ctypes.sizeof(ctypes.c_uint32) or size <= 0 or size % 4:
+            raise ValueError("MMIO base and size must be positive and 32-bit aligned")
+
+        page_size = mmap.PAGESIZE
+        page_base = base & ~(page_size - 1)
+        page_offset = base - page_base
+        map_size = page_offset + size
+        self._page_offset = page_offset
+        self._fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC | os.O_CLOEXEC)
+        self._mem = mmap.mmap(
+            self._fd,
+            map_size,
+            mmap.MAP_SHARED,
+            mmap.PROT_READ | mmap.PROT_WRITE,
+            offset=page_base,
+        )
+        word_array = ctypes.c_uint32 * (map_size // ctypes.sizeof(ctypes.c_uint32))
+        self._words = word_array.from_buffer(self._mem)
+
+    def close(self) -> None:
+        del self._words
+        self._mem.close()
+        os.close(self._fd)
+
+    def __enter__(self) -> "DevMem32":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
+    def read32(self, offset: int) -> int:
+        self._check_offset(offset)
+        return int(self._words[self._word_index(offset)])
+
+    def write32(self, offset: int, value: int) -> None:
+        self._check_offset(offset)
+        # mmap slice assignment uses memcpy(), which may split or duplicate an
+        # MMIO store. A typed native word assignment emits one 32-bit access.
+        self._words[self._word_index(offset)] = value & 0xFFFF_FFFF
+
+    def _word_index(self, offset: int) -> int:
+        return (self._page_offset + offset) // ctypes.sizeof(ctypes.c_uint32)
+
+    @staticmethod
+    def _check_offset(offset: int) -> None:
+        if offset < 0 or offset % WORD.size:
+            raise ValueError(f"unaligned APB offset: 0x{offset:x}")
+        if offset > APB_SIZE - WORD.size:
+            raise ValueError(f"APB offset is outside the mapped window: 0x{offset:x}")
+
+
+def parse_int(text: str) -> int:
+    return int(text, 0)
+
+
+def read_text(path: str) -> str:
+    with open(path, "r", encoding="ascii") as stream:
+        return stream.read().rstrip("\0\n")
+
+
+def preflight_platform(base: int) -> None:
+    if base != APB_BASE:
+        return
+    try:
+        firmware_name = read_text(FPGA_FIRMWARE_NAME_PATH)
+    except OSError as exc:
+        raise RuntimeError(
+            "Q-Crate FPGA ownership cannot be verified; "
+            "qcrate-pl-load.service is not ready"
+        ) from exc
+    if firmware_name != FPGA_FIRMWARE_NAME:
+        raise RuntimeError(
+            f"FPGA region contains {firmware_name!r}, expected {FPGA_FIRMWARE_NAME!r}"
+        )
+    for clock_name, path, expected in CLOCK_RATE_PATHS:
+        try:
+            actual = int(read_text(path), 10)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"cannot verify {clock_name} at {path}") from exc
+        if abs(actual - expected) > CLOCK_RATE_TOLERANCE_HZ:
+            raise RuntimeError(
+                f"{clock_name} is {actual} Hz, expected {expected} Hz "
+                f"(+/- {CLOCK_RATE_TOLERANCE_HZ} Hz)"
+            )
+
+
+def decode_image(contents: bytes) -> SequenceImage:
+    if len(contents) < HEADER.size:
+        raise SequenceError("sequence image is shorter than its header")
+    (
+        magic,
+        version,
+        header_size,
+        event_count,
+        event_size,
+        tick_hz,
+        expected_crc,
+        reserved,
+    ) = HEADER.unpack_from(contents)
+    if magic != MAGIC:
+        raise SequenceError("wrong sequence magic")
+    if version != FORMAT_VERSION:
+        raise SequenceError(f"unsupported sequence format version {version}")
+    if header_size != HEADER.size or event_size != EVENT.size:
+        raise SequenceError("incompatible header or event-record size")
+    if tick_hz != STREAM_CLOCK_HZ:
+        raise SequenceError(
+            f"sequence tick rate is {tick_hz} Hz, expected {STREAM_CLOCK_HZ} Hz"
+        )
+    if reserved != 0:
+        raise SequenceError("reserved header field is nonzero")
+    if not MIN_EVENTS <= event_count <= MAX_EVENTS:
+        raise SequenceError(
+            f"event count must be between {MIN_EVENTS} and {MAX_EVENTS}"
+        )
+    expected_size = header_size + event_count * event_size
+    if len(contents) != expected_size:
+        raise SequenceError(
+            f"image is {len(contents)} bytes; expected exactly {expected_size}"
+        )
+
+    payload = contents[header_size:]
+    actual_crc = zlib.crc32(payload) & 0xFFFF_FFFF
+    if actual_crc != expected_crc:
+        raise SequenceError(
+            f"payload CRC mismatch: expected 0x{expected_crc:08x}, "
+            f"got 0x{actual_crc:08x}"
+        )
+
+    events = tuple(
+        SequenceEvent(*EVENT.unpack_from(payload, index * EVENT.size))
+        for index in range(event_count)
+    )
+    previous_timestamp: int | None = None
+    previous_state = 0
+    for index, event in enumerate(events):
+        if previous_timestamp is not None and event.timestamp <= previous_timestamp:
+            raise SequenceError(f"event {index} timestamp is not strictly increasing")
+        if event.output_state & ~OUTPUT_MASK:
+            raise SequenceError(f"event {index} uses reserved output-state bits")
+        if event.flags:
+            raise SequenceError(f"event {index} has nonzero reserved flags")
+        if event.output_state == previous_state:
+            raise SequenceError(f"event {index} does not change output state")
+        previous_timestamp = event.timestamp
+        previous_state = event.output_state
+    if previous_state != 0:
+        raise SequenceError("final event does not restore both outputs low")
+    return SequenceImage(events, payload, actual_crc)
+
+
+def read64(regs: DevMem32, low_offset: int, high_offset: int) -> int:
+    low = regs.read32(low_offset)
+    high = regs.read32(high_offset)
+    return (high << 32) | low
+
+
+def read_status(regs: DevMem32) -> SequenceStatus:
+    fault_info = regs.read32(SEQ_FAULT_INFO)
+    return SequenceStatus(
+        raw=regs.read32(SEQ_STATUS),
+        event_count=regs.read32(SEQ_EVENT_COUNT),
+        active_event=regs.read32(SEQ_ACTIVE_EVENT),
+        completed_shots=regs.read32(SEQ_COMPLETED_SHOTS),
+        fault_code=fault_info & 0xFF,
+        fault_event=(fault_info >> 16) & 0x7F,
+        timebase=read64(regs, SEQ_TIMEBASE_LO, SEQ_TIMEBASE_HI),
+        start_time=read64(regs, SEQ_START_TIME_LO, SEQ_START_TIME_HI),
+        elapsed_ticks=read64(regs, SEQ_ELAPSED_LO, SEQ_ELAPSED_HI),
+    )
+
+
+def state_name(status: SequenceStatus) -> str:
+    states = (
+        (status.faulted, "faulted"),
+        (status.busy, "busy"),
+        (status.armed, "armed"),
+        (status.validating, "validating"),
+        (status.idle, "idle"),
+    )
+    return next((name for active, name in states if active), "unknown")
+
+
+def print_status(status: SequenceStatus) -> None:
+    print(f"state              : {state_name(status)}")
+    print(f"status raw         : 0x{status.raw:08x}")
+    print(f"command busy       : {'yes' if status.command_busy else 'no'}")
+    print(f"event memory locked: {'yes' if status.memory_locked else 'no'}")
+    print(f"event count        : {status.event_count}")
+    print(f"active event       : {status.active_event}")
+    print(f"completed shots    : {status.completed_shots}")
+    print(f"timebase           : {status.timebase} ticks")
+    print(f"start time         : {status.start_time} ticks")
+    print(f"elapsed            : {status.elapsed_ticks} ticks")
+    fault_name = FAULT_NAMES.get(status.fault_code, "unknown fault")
+    print(
+        f"fault              : {status.fault_code} ({fault_name}), "
+        f"event {status.fault_event}"
+    )
+
+
+def wait_for(
+    regs: DevMem32,
+    predicate,
+    *,
+    timeout_ms: int,
+    description: str,
+    fail_on_fault: bool = True,
+) -> SequenceStatus:
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while True:
+        status = read_status(regs)
+        if fail_on_fault and status.faulted:
+            fault_name = FAULT_NAMES.get(status.fault_code, "unknown fault")
+            raise RuntimeError(
+                f"hardware fault {status.fault_code} ({fault_name}) "
+                f"at event {status.fault_event}"
+            )
+        if predicate(status):
+            return status
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"timed out after {timeout_ms} ms waiting for {description}; "
+                f"last state was {state_name(status)} (0x{status.raw:08x})"
+            )
+        time.sleep(0.001)
+
+
+def require_command_ready(regs: DevMem32) -> SequenceStatus:
+    status = read_status(regs)
+    if status.command_busy:
+        raise RuntimeError("a sequencer command is still crossing clock domains")
+    return status
+
+
+def load_image(regs: DevMem32, image: SequenceImage) -> None:
+    status = require_command_ready(regs)
+    if not status.idle or status.memory_locked:
+        raise RuntimeError(
+            f"event memory is not writable: state={state_name(status)}, "
+            f"locked={'yes' if status.memory_locked else 'no'}"
+        )
+
+    words = tuple(
+        WORD.unpack_from(image.payload, offset)[0]
+        for offset in range(0, len(image.payload), WORD.size)
+    )
+    for index, value in enumerate(words):
+        regs.write32(SEQ_EVENT_MEMORY + index * WORD.size, value)
+    regs.write32(SEQ_EVENT_COUNT, len(image.events))
+
+    for index, expected in enumerate(words):
+        actual = regs.read32(SEQ_EVENT_MEMORY + index * WORD.size)
+        if actual != expected:
+            raise RuntimeError(
+                f"event-memory readback mismatch at word {index}: "
+                f"expected 0x{expected:08x}, got 0x{actual:08x}"
+            )
+    actual_count = regs.read32(SEQ_EVENT_COUNT)
+    if actual_count != len(image.events):
+        raise RuntimeError(
+            f"EVENT_COUNT readback is {actual_count}, expected {len(image.events)}"
+        )
+    print(
+        f"PASS loaded and verified {len(image.events)} events "
+        f"({len(image.payload)} bytes, CRC 0x{image.crc32:08x})"
+    )
+
+
+def command_arm(regs: DevMem32, timeout_ms: int, external_trigger: bool) -> None:
+    status = require_command_ready(regs)
+    if not status.idle or status.memory_locked:
+        raise RuntimeError("sequencer must be idle with event memory unlocked before arm")
+    control = CONTROL_ARM
+    if external_trigger:
+        control |= CONTROL_EXTERNAL_TRIGGER_ENABLE
+    regs.write32(SEQ_CONTROL, control)
+    status = wait_for(
+        regs,
+        lambda value: value.armed,
+        timeout_ms=timeout_ms,
+        description="arm-time validation",
+    )
+    print(f"PASS armed {status.event_count} events")
+
+
+def command_start(regs: DevMem32, timeout_ms: int) -> SequenceStatus:
+    status = require_command_ready(regs)
+    if not status.armed:
+        raise RuntimeError(f"sequencer is {state_name(status)}, not armed")
+    completed_before = status.completed_shots
+    regs.write32(SEQ_CONTROL, CONTROL_START)
+    status = wait_for(
+        regs,
+        lambda value: value.completed_shots != completed_before,
+        timeout_ms=timeout_ms,
+        description="sequence completion",
+    )
+    if not status.idle or status.memory_locked:
+        status = wait_for(
+            regs,
+            lambda value: value.idle and not value.memory_locked,
+            timeout_ms=timeout_ms,
+            description="event-memory release",
+        )
+    print(
+        f"PASS shot {status.completed_shots}; start={status.start_time}, "
+        f"elapsed={status.elapsed_ticks} ticks"
+    )
+    return status
+
+
+def command_abort(regs: DevMem32, timeout_ms: int) -> None:
+    status = require_command_ready(regs)
+    if status.idle:
+        raise RuntimeError("sequencer is already idle")
+    regs.write32(SEQ_CONTROL, CONTROL_ABORT)
+    wait_for(
+        regs,
+        lambda value: value.idle and not value.memory_locked,
+        timeout_ms=timeout_ms,
+        description="abort and event-memory release",
+    )
+    print("PASS abort returned the sequencer to idle")
+
+
+def command_reset(regs: DevMem32, timeout_ms: int) -> None:
+    require_command_ready(regs)
+    regs.write32(SEQ_CONTROL, CONTROL_SOFT_RESET)
+    status = wait_for(
+        regs,
+        lambda value: value.idle and not value.memory_locked and
+                      not value.command_busy,
+        timeout_ms=timeout_ms,
+        description="sequencer soft reset",
+        fail_on_fault=False,
+    )
+    if status.fault_code != 0:
+        raise RuntimeError("fault code did not clear after soft reset")
+    print("PASS sequencer reset; shared timebase was not reset")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--base",
+        type=parse_int,
+        default=APB_BASE,
+        help="physical APB base address, default: 0xA0010000",
+    )
+    parser.add_argument(
+        "--timeout-ms", type=int, default=2000, help="state-transition timeout"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("status", help="print sequencer status and timestamps")
+
+    load_parser = subparsers.add_parser("load", help="validate and upload a .qseq")
+    load_parser.add_argument("image", type=Path)
+
+    arm_parser = subparsers.add_parser("arm", help="validate hardware table and arm")
+    arm_parser.add_argument("--external-trigger", action="store_true")
+
+    subparsers.add_parser("start", help="start an armed sequence and wait for completion")
+    subparsers.add_parser("abort", help="abort validation, armed, or running state")
+    subparsers.add_parser("reset", help="soft-reset sequencer state, not the timebase")
+
+    test_parser = subparsers.add_parser(
+        "test", help="load, arm, start, and verify one completed shot"
+    )
+    test_parser.add_argument("image", type=Path)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.timeout_ms <= 0:
+        print("qcrate-sequence: --timeout-ms must be positive", file=sys.stderr)
+        return 2
+
+    try:
+        image = None
+        if args.command in {"load", "test"}:
+            image = decode_image(args.image.read_bytes())
+        preflight_platform(args.base)
+        with DevMem32(args.base, APB_SIZE) as regs:
+            if args.command == "status":
+                print_status(read_status(regs))
+            elif args.command == "load":
+                load_image(regs, image)
+            elif args.command == "arm":
+                command_arm(regs, args.timeout_ms, args.external_trigger)
+            elif args.command == "start":
+                command_start(regs, args.timeout_ms)
+            elif args.command == "abort":
+                command_abort(regs, args.timeout_ms)
+            elif args.command == "reset":
+                command_reset(regs, args.timeout_ms)
+            elif args.command == "test":
+                load_image(regs, image)
+                timebase_before = read_status(regs).timebase
+                command_arm(regs, args.timeout_ms, False)
+                final_status = command_start(regs, args.timeout_ms)
+                if final_status.timebase <= timebase_before:
+                    raise RuntimeError("shared timebase did not advance")
+                print("PASS Q-Crate sequencer control-path acceptance")
+            else:
+                raise AssertionError(f"unhandled command {args.command}")
+    except (OSError, RuntimeError, SequenceError, TimeoutError, ValueError) as exc:
+        print(f"qcrate-sequence: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,19 @@
+{
+  "format": "qcrate-sequence-v1",
+  "name": "two-channel-demo",
+  "tick_hz": 200000000,
+  "pulses": [
+    {
+      "name": "channel-0",
+      "channel": 0,
+      "start_tick": 0,
+      "duration_ticks": 1000
+    },
+    {
+      "name": "channel-1",
+      "channel": 1,
+      "start_tick": 400,
+      "duration_ticks": 300
+    }
+  ]
+}

@@ -45,6 +45,7 @@ REQUIRED_ROOTFS_FILES = {
     "./usr/bin/qcrate-first-boot",
     "./usr/bin/qcrate-load-pl",
     "./usr/bin/qcrate-r5-remoteproc",
+    "./usr/bin/qcrate-sequence",
     "./usr/bin/xmutil",
     "./usr/lib/firmware/qcrate/qcrate-r5.elf",
     "./usr/lib/firmware/xilinx/base/pl.dtbo",

@@ -950,7 +950,7 @@ Before writing an SD card, confirm that the fixed platform is complete:
 
 ```bash
 tar -tzf images/linux/rootfs.tar.gz | \
-  rg 'qcrate-apb|qcrate-pl-load|firmware/xilinx/base/(pl.dtbo|qcrate_kv260.bit.bin)'
+  rg 'qcrate-(apb|sequence)|qcrate-pl-load|firmware/xilinx/base/(pl.dtbo|qcrate_kv260.bit.bin)'
 
 rg -n '^(qcrate-firmware|qcrate-pl-loader|qcrate-tools) ' \
   images/linux/rootfs.manifest
@@ -1784,3 +1784,124 @@ The fixed platform now has a separately documented heterogeneous-control
 extension. See `../openamp/README.md` before building it: the R5 ELF must be
 generated and staged by the Vitis flow before BitBake can build the
 `qcrate-openamp` recipe.
+
+## Deterministic pulse-sequencer acceptance
+
+The first sequencer software slice deliberately uses A53 `/dev/mem` access.
+This proves the binary contract, APB register page, event RAM, CDC, validation,
+and PL execution before R5 firmware becomes the sole runtime owner. It is a
+bring-up interface, not the final heterogeneous-control architecture.
+
+The development PC compiles readable JSON pulse intervals into the versioned,
+CRC-protected `.qseq` format:
+
+```bash
+cd /tools/fpga_projects/qcrate
+python3 host/sequence_compiler/qcrate_sequence.py compile \
+  host/sequence_compiler/examples/two_channel_demo.json \
+  /tmp/two_channel_demo.qseq
+python3 host/sequence_compiler/qcrate_sequence.py inspect \
+  /tmp/two_channel_demo.qseq
+```
+
+Expected canonical events are:
+
+```text
+tick 0     state 01
+tick 400   state 11
+tick 700   state 01
+tick 1000  state 00
+```
+
+The target `qcrate-sequence` parser independently verifies the magic, version,
+record sizes, 200 MHz tick rate, exact file size, payload CRC, increasing
+timestamps, reserved fields, state changes, and safe final state before opening
+`/dev/mem`. During upload it reads back every 32-bit event-memory word and the
+event count.
+
+After an XSA change, rebuild and deploy the complete fixed platform using the
+normal automated flow. Replace the example SD-card device after checking
+`lsblk`:
+
+```bash
+cd /tools/fpga_projects/qcrate
+source /tools/Xilinx/PetaLinux/2024.2/settings.sh
+python3 kv260/linux/petalinux/scripts/petalinux_flow.py all \
+  --device /dev/mmcblk0
+```
+
+For a focused recipe diagnosis before the full image build:
+
+```bash
+cd /tools/fpga_projects/qcrate/kv260/linux/petalinux/qcrate-kv260
+petalinux-build -c qcrate-tools
+```
+
+Audit the resulting root filesystem:
+
+```bash
+tar -tzf images/linux/rootfs.tar.gz | \
+  rg 'usr/bin/qcrate-(apb|sequence|first-boot)$'
+```
+
+Copy the compiled sequence to the running target over the network:
+
+```bash
+scp /tmp/two_channel_demo.qseq \
+  petalinux@<kv260-ip>:~/qcrate/two_channel_demo.qseq
+```
+
+Run the target acceptance test:
+
+```bash
+sudo qcrate-first-boot test
+sudo qcrate-sequence status
+sudo qcrate-sequence test ~/qcrate/two_channel_demo.qseq
+sudo qcrate-sequence status
+```
+
+Expected result:
+
+```text
+PASS loaded and verified 4 events
+PASS armed 4 events
+PASS shot 1
+PASS Q-Crate sequencer control-path acceptance
+```
+
+If the tool reports fault 9 before printing `PASS armed`, the event image is
+not the failed check: upload, CRC, and readback have already completed. Fault 9
+means the engine received a command that was illegal for its current state,
+such as a repeated ARM during validation. Do not implement MMIO writes with a
+Python mmap slice: CPython delegates the copy to `memcpy()`, whose optimized
+small-copy implementation may issue more than one device-memory store. This
+was observed on the KV260 as two ARM transactions. A single BusyBox `devmem`
+write armed the same uploaded sequence correctly. `qcrate-apb` and
+`qcrate-sequence` therefore use typed native `ctypes.c_uint32` accesses. The
+sequencer APB register block additionally qualifies side effects once per APB
+access phase. Use `sudo qcrate-sequence reset` to return a faulted engine to
+idle before the next test.
+
+Individual lifecycle commands are also available:
+
+```bash
+sudo qcrate-sequence load ~/qcrate/two_channel_demo.qseq
+sudo qcrate-sequence arm
+sudo qcrate-sequence start
+sudo qcrate-sequence abort
+sudo qcrate-sequence reset
+sudo qcrate-sequence status
+```
+
+`arm --external-trigger` is implemented in the register protocol but must not
+be used on the current KV260 wrapper because `sequence_trigger_i` is tied low.
+Likewise, `qcrate-sequence test` proves control-path execution, event validation,
+safe completion, and shot accounting; it does not prove physical pulse timing.
+The two pulse outputs are still internal to `qcrate_top` and have no board pin
+or XDC assignment. Physical output routing and measurement form a separate
+hardware milestone.
+
+The event-memory ownership contract is visible in `STATUS` bit 9. `ARM` locks
+RAM immediately. Done or abort releases it. A validation fault keeps it locked
+until `qcrate-sequence reset` completes. Attempts to load while locked are
+rejected in software and return APB `PSLVERR` in hardware.

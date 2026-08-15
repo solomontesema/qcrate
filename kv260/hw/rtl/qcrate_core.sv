@@ -42,6 +42,13 @@ module qcrate_core #(
     output logic                         m_axis_tlast_o,
 
     // ============================================================
+    // Deterministic pulse-sequencer interface
+    // ============================================================
+
+    input  logic                         sequence_trigger_i,
+    output logic [1:0]                   sequence_pulse_o,
+
+    // ============================================================
     // Interrupt toward PS
     // ============================================================
 
@@ -54,6 +61,7 @@ module qcrate_core #(
 
     logic sys_psel;
     logic stream_psel;
+    logic sequence_psel;
 
     logic [31:0] sys_prdata;
     logic        sys_pready;
@@ -62,6 +70,14 @@ module qcrate_core #(
     logic [31:0] stream_prdata;
     logic        stream_pready;
     logic        stream_pslverr;
+
+    logic [31:0] sequence_prdata;
+    logic        sequence_pready;
+    logic        sequence_pslverr;
+
+    localparam int SEQUENCE_MAX_EVENTS = 128;
+    localparam int SEQUENCE_ADDR_WIDTH = $clog2(SEQUENCE_MAX_EVENTS);
+    localparam int SEQUENCE_COUNT_WIDTH = SEQUENCE_ADDR_WIDTH + 1;
 
     // ============================================================
     // Configuration in 100 MHz control domain
@@ -126,6 +142,70 @@ module qcrate_core #(
     logic [31:0] irq_status_ctrl;
 
     // ============================================================
+    // Pulse-sequencer control and dual-clock event memory
+    // ============================================================
+
+    logic [SEQUENCE_COUNT_WIDTH-1:0] sequence_event_count_ctrl;
+    logic sequence_external_trigger_enable_ctrl;
+    logic sequence_arm_cmd_ctrl;
+    logic sequence_start_cmd_ctrl;
+    logic sequence_abort_cmd_ctrl;
+    logic sequence_soft_reset_cmd_ctrl;
+    logic sequence_command_busy_ctrl;
+
+    logic sequence_ram_ctrl_en;
+    logic sequence_ram_ctrl_write;
+    logic [SEQUENCE_ADDR_WIDTH+1:0] sequence_ram_ctrl_addr;
+    logic [31:0] sequence_ram_ctrl_wdata;
+    logic sequence_ram_ctrl_rvalid;
+    logic [31:0] sequence_ram_ctrl_rdata;
+
+    logic [SEQUENCE_COUNT_WIDTH-1:0] sequence_event_count_stream;
+    logic sequence_external_trigger_enable_stream;
+    logic sequence_arm_pulse_stream;
+    logic sequence_start_pulse_stream;
+    logic sequence_abort_pulse_stream;
+    logic sequence_soft_reset_pulse_stream;
+
+    logic sequence_ram_stream_req;
+    logic [SEQUENCE_ADDR_WIDTH-1:0] sequence_ram_stream_addr;
+    logic sequence_ram_stream_valid;
+    logic [127:0] sequence_ram_stream_data;
+
+    logic sequence_idle_stream;
+    logic sequence_validating_stream;
+    logic sequence_armed_stream;
+    logic sequence_busy_stream;
+    logic sequence_faulted_stream;
+    logic sequence_done_pulse_stream;
+    logic sequence_aborted_pulse_stream;
+    logic sequence_fault_pulse_stream;
+    logic [7:0] sequence_fault_code_stream;
+    logic [SEQUENCE_ADDR_WIDTH-1:0] sequence_fault_index_stream;
+    logic [SEQUENCE_ADDR_WIDTH-1:0] sequence_active_index_stream;
+    logic [31:0] sequence_completed_shots_stream;
+    logic [63:0] sequence_timebase_stream;
+    logic [63:0] sequence_start_time_stream;
+    logic [63:0] sequence_elapsed_tick_stream;
+
+    logic sequence_idle_ctrl;
+    logic sequence_validating_ctrl;
+    logic sequence_armed_ctrl;
+    logic sequence_busy_ctrl;
+    logic sequence_faulted_ctrl;
+    logic [7:0] sequence_fault_code_ctrl;
+    logic [SEQUENCE_ADDR_WIDTH-1:0] sequence_fault_index_ctrl;
+    logic [SEQUENCE_ADDR_WIDTH-1:0] sequence_active_index_ctrl;
+    logic [31:0] sequence_completed_shots_ctrl;
+    logic [63:0] sequence_timebase_ctrl;
+    logic [63:0] sequence_start_time_ctrl;
+    logic [63:0] sequence_elapsed_tick_ctrl;
+
+    logic sequence_done_event_ctrl;
+    logic sequence_aborted_event_ctrl;
+    logic sequence_fault_event_ctrl;
+
+    // ============================================================
     // APB address decoder and response multiplexer
     // ============================================================
 
@@ -141,6 +221,7 @@ module qcrate_core #(
 
         .sys_psel_o         (sys_psel),
         .stream_psel_o      (stream_psel),
+        .sequence_psel_o    (sequence_psel),
 
         .sys_prdata_i       (sys_prdata),
         .sys_pready_i       (sys_pready),
@@ -149,6 +230,10 @@ module qcrate_core #(
         .stream_prdata_i    (stream_prdata),
         .stream_pready_i    (stream_pready),
         .stream_pslverr_i   (stream_pslverr),
+
+        .sequence_prdata_i  (sequence_prdata),
+        .sequence_pready_i  (sequence_pready),
+        .sequence_pslverr_i (sequence_pslverr),
 
         .prdata_o           (s_apb_prdata_o),
         .pready_o           (s_apb_pready_o),
@@ -211,6 +296,191 @@ module qcrate_core #(
         .irq_status_i               (irq_status_ctrl),
         .irq_enable_o               (irq_enable_ctrl),
         .irq_clear_o                (irq_clear_ctrl)
+    );
+
+    // ============================================================
+    // Pulse-sequencer APB page and event memory control port
+    // ============================================================
+
+    qcrate_sequence_regs #(
+        .EVENT_ADDR_WIDTH           (SEQUENCE_ADDR_WIDTH),
+        .EVENT_COUNT_WIDTH          (SEQUENCE_COUNT_WIDTH),
+        .RAM_CTRL_ADDR_WIDTH        (SEQUENCE_ADDR_WIDTH + 2)
+    ) u_sequence_regs (
+        .pclk_i                     (clk_ctrl_i),
+        .presetn_i                  (rst_ctrl_n_i),
+        .paddr_i                    (s_apb_paddr_i[11:0]),
+        .psel_i                     (sequence_psel),
+        .penable_i                  (s_apb_penable_i),
+        .pwrite_i                   (s_apb_pwrite_i),
+        .pwdata_i                   (s_apb_pwdata_i),
+        .prdata_o                   (sequence_prdata),
+        .pready_o                   (sequence_pready),
+        .pslverr_o                  (sequence_pslverr),
+
+        .event_count_o              (sequence_event_count_ctrl),
+        .external_trigger_enable_o  (sequence_external_trigger_enable_ctrl),
+        .arm_cmd_o                  (sequence_arm_cmd_ctrl),
+        .start_cmd_o                (sequence_start_cmd_ctrl),
+        .abort_cmd_o                (sequence_abort_cmd_ctrl),
+        .soft_reset_cmd_o           (sequence_soft_reset_cmd_ctrl),
+        .command_busy_i             (sequence_command_busy_ctrl),
+        .done_event_i               (sequence_done_event_ctrl),
+        .aborted_event_i            (sequence_aborted_event_ctrl),
+
+        .idle_i                     (sequence_idle_ctrl),
+        .validating_i               (sequence_validating_ctrl),
+        .armed_i                    (sequence_armed_ctrl),
+        .busy_i                     (sequence_busy_ctrl),
+        .faulted_i                  (sequence_faulted_ctrl),
+        .fault_code_i               (sequence_fault_code_ctrl),
+        .fault_event_index_i        (sequence_fault_index_ctrl),
+        .active_event_index_i       (sequence_active_index_ctrl),
+        .completed_shots_i          (sequence_completed_shots_ctrl),
+        .timebase_i                 (sequence_timebase_ctrl),
+        .start_time_i               (sequence_start_time_ctrl),
+        .elapsed_tick_i             (sequence_elapsed_tick_ctrl),
+
+        .ram_en_o                   (sequence_ram_ctrl_en),
+        .ram_write_o                (sequence_ram_ctrl_write),
+        .ram_addr_o                 (sequence_ram_ctrl_addr),
+        .ram_wdata_o                (sequence_ram_ctrl_wdata),
+        .ram_rvalid_i               (sequence_ram_ctrl_rvalid),
+        .ram_rdata_i                (sequence_ram_ctrl_rdata)
+    );
+
+    qcrate_sequence_ram #(
+        .MAX_EVENTS                 (SEQUENCE_MAX_EVENTS),
+        .EVENT_ADDR_WIDTH           (SEQUENCE_ADDR_WIDTH),
+        .CTRL_ADDR_WIDTH            (SEQUENCE_ADDR_WIDTH + 2)
+    ) u_sequence_ram (
+        .ctrl_clk_i                 (clk_ctrl_i),
+        .ctrl_rst_n_i               (rst_ctrl_n_i),
+        .ctrl_en_i                  (sequence_ram_ctrl_en),
+        .ctrl_write_i               (sequence_ram_ctrl_write),
+        .ctrl_addr_i                (sequence_ram_ctrl_addr),
+        .ctrl_wdata_i               (sequence_ram_ctrl_wdata),
+        .ctrl_rvalid_o              (sequence_ram_ctrl_rvalid),
+        .ctrl_rdata_o               (sequence_ram_ctrl_rdata),
+
+        .stream_clk_i               (clk_stream_i),
+        .stream_rst_n_i             (rst_stream_n_i),
+        .stream_req_i               (sequence_ram_stream_req),
+        .stream_addr_i              (sequence_ram_stream_addr),
+        .stream_valid_o             (sequence_ram_stream_valid),
+        .stream_data_o              (sequence_ram_stream_data)
+    );
+
+    qcrate_sequence_command_cdc #(
+        .EVENT_COUNT_WIDTH          (SEQUENCE_COUNT_WIDTH)
+    ) u_sequence_command_cdc (
+        .ctrl_clk_i                 (clk_ctrl_i),
+        .ctrl_rst_n_i               (rst_ctrl_n_i),
+        .event_count_i              (sequence_event_count_ctrl),
+        .external_trigger_enable_i  (sequence_external_trigger_enable_ctrl),
+        .arm_cmd_i                  (sequence_arm_cmd_ctrl),
+        .start_cmd_i                (sequence_start_cmd_ctrl),
+        .abort_cmd_i                (sequence_abort_cmd_ctrl),
+        .soft_reset_cmd_i           (sequence_soft_reset_cmd_ctrl),
+        .command_busy_o             (sequence_command_busy_ctrl),
+
+        .stream_clk_i               (clk_stream_i),
+        .stream_rst_n_i             (rst_stream_n_i),
+        .active_event_count_o       (sequence_event_count_stream),
+        .active_external_trigger_enable_o
+                                    (sequence_external_trigger_enable_stream),
+        .arm_pulse_o                (sequence_arm_pulse_stream),
+        .start_pulse_o              (sequence_start_pulse_stream),
+        .abort_pulse_o              (sequence_abort_pulse_stream),
+        .soft_reset_pulse_o         (sequence_soft_reset_pulse_stream)
+    );
+
+    qcrate_timebase u_timebase (
+        .clk_i                      (clk_stream_i),
+        .rst_n_i                    (rst_stream_n_i),
+        .time_o                     (sequence_timebase_stream)
+    );
+
+    qcrate_sequence_engine #(
+        .MAX_EVENTS                 (SEQUENCE_MAX_EVENTS),
+        .EVENT_ADDR_WIDTH           (SEQUENCE_ADDR_WIDTH)
+    ) u_sequence_engine (
+        .clk_i                      (clk_stream_i),
+        .rst_n_i                    (rst_stream_n_i),
+        .arm_i                      (sequence_arm_pulse_stream),
+        .start_i                    (sequence_start_pulse_stream),
+        .abort_i                    (sequence_abort_pulse_stream),
+        .soft_reset_i               (sequence_soft_reset_pulse_stream),
+        .external_trigger_enable_i  (sequence_external_trigger_enable_stream),
+        .external_trigger_i         (sequence_trigger_i),
+        .event_count_i              (sequence_event_count_stream),
+        .timebase_i                 (sequence_timebase_stream),
+        .event_req_o                (sequence_ram_stream_req),
+        .event_addr_o               (sequence_ram_stream_addr),
+        .event_valid_i              (sequence_ram_stream_valid),
+        .event_data_i               (sequence_ram_stream_data),
+        .idle_o                     (sequence_idle_stream),
+        .validating_o               (sequence_validating_stream),
+        .armed_o                    (sequence_armed_stream),
+        .busy_o                     (sequence_busy_stream),
+        .faulted_o                  (sequence_faulted_stream),
+        .done_pulse_o               (sequence_done_pulse_stream),
+        .aborted_pulse_o            (sequence_aborted_pulse_stream),
+        .fault_pulse_o              (sequence_fault_pulse_stream),
+        .fault_code_o               (sequence_fault_code_stream),
+        .fault_event_index_o        (sequence_fault_index_stream),
+        .active_event_index_o       (sequence_active_index_stream),
+        .completed_shots_o          (sequence_completed_shots_stream),
+        .start_time_o               (sequence_start_time_stream),
+        .elapsed_tick_o             (sequence_elapsed_tick_stream),
+        .pulse_o                    (sequence_pulse_o)
+    );
+
+    qcrate_sequence_status_cdc #(
+        .EVENT_ADDR_WIDTH           (SEQUENCE_ADDR_WIDTH)
+    ) u_sequence_status_cdc (
+        .stream_clk_i               (clk_stream_i),
+        .stream_rst_n_i             (rst_stream_n_i),
+        .idle_i                     (sequence_idle_stream),
+        .validating_i               (sequence_validating_stream),
+        .armed_i                    (sequence_armed_stream),
+        .busy_i                     (sequence_busy_stream),
+        .faulted_i                  (sequence_faulted_stream),
+        .fault_code_i               (sequence_fault_code_stream),
+        .fault_event_index_i        (sequence_fault_index_stream),
+        .active_event_index_i       (sequence_active_index_stream),
+        .completed_shots_i          (sequence_completed_shots_stream),
+        .timebase_i                 (sequence_timebase_stream),
+        .start_time_i               (sequence_start_time_stream),
+        .elapsed_tick_i             (sequence_elapsed_tick_stream),
+
+        .ctrl_clk_i                 (clk_ctrl_i),
+        .ctrl_rst_n_i               (rst_ctrl_n_i),
+        .idle_o                     (sequence_idle_ctrl),
+        .validating_o               (sequence_validating_ctrl),
+        .armed_o                    (sequence_armed_ctrl),
+        .busy_o                     (sequence_busy_ctrl),
+        .faulted_o                  (sequence_faulted_ctrl),
+        .fault_code_o               (sequence_fault_code_ctrl),
+        .fault_event_index_o        (sequence_fault_index_ctrl),
+        .active_event_index_o       (sequence_active_index_ctrl),
+        .completed_shots_o          (sequence_completed_shots_ctrl),
+        .timebase_o                 (sequence_timebase_ctrl),
+        .start_time_o               (sequence_start_time_ctrl),
+        .elapsed_tick_o             (sequence_elapsed_tick_ctrl)
+    );
+
+    qcrate_sequence_event_cdc u_sequence_event_cdc (
+        .src_clk_i                  (clk_stream_i),
+        .src_rst_n_i                (rst_stream_n_i),
+        .done_pulse_i               (sequence_done_pulse_stream),
+        .aborted_pulse_i            (sequence_aborted_pulse_stream),
+        .fault_pulse_i              (sequence_fault_pulse_stream),
+        .dst_clk_i                  (clk_ctrl_i),
+        .dst_rst_n_i                (rst_ctrl_n_i),
+        .done_pulse_o               (sequence_done_event_ctrl),
+        .aborted_pulse_o            (sequence_aborted_event_ctrl),
+        .fault_pulse_o              (sequence_fault_event_ctrl)
     );
 
     // ============================================================
@@ -320,7 +590,10 @@ module qcrate_core #(
     );
 
     assign irq_events_ctrl = {
-        30'd0,
+        27'd0,
+        sequence_fault_event_ctrl,
+        sequence_aborted_event_ctrl,
+        sequence_done_event_ctrl,
         stream_error_event_ctrl,
         frame_done_event_ctrl
     };

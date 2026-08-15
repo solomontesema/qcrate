@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import mmap
 import os
-import struct
 import sys
 from dataclasses import dataclass
 
@@ -47,6 +47,20 @@ STREAM_IRQ_STATUS = STREAM_BASE + 0x024
 STREAM_IRQ_ENABLE = STREAM_BASE + 0x028
 STREAM_IRQ_CLEAR = STREAM_BASE + 0x02C
 
+SEQUENCE_BASE = 0x2000
+SEQUENCE_CONTROL = SEQUENCE_BASE + 0x000
+SEQUENCE_STATUS = SEQUENCE_BASE + 0x004
+SEQUENCE_EVENT_COUNT = SEQUENCE_BASE + 0x008
+SEQUENCE_ACTIVE_EVENT = SEQUENCE_BASE + 0x00C
+SEQUENCE_COMPLETED_SHOTS = SEQUENCE_BASE + 0x010
+SEQUENCE_FAULT_INFO = SEQUENCE_BASE + 0x014
+SEQUENCE_TIMEBASE_LO = SEQUENCE_BASE + 0x018
+SEQUENCE_TIMEBASE_HI = SEQUENCE_BASE + 0x01C
+SEQUENCE_START_TIME_LO = SEQUENCE_BASE + 0x020
+SEQUENCE_START_TIME_HI = SEQUENCE_BASE + 0x024
+SEQUENCE_ELAPSED_LO = SEQUENCE_BASE + 0x028
+SEQUENCE_ELAPSED_HI = SEQUENCE_BASE + 0x02C
+
 
 @dataclass(frozen=True)
 class Register:
@@ -73,11 +87,28 @@ REGISTERS = [
     Register("STREAM.STALL_CYCLES", STREAM_STALL_CYCLES),
     Register("STREAM.IRQ_STATUS", STREAM_IRQ_STATUS),
     Register("STREAM.IRQ_ENABLE", STREAM_IRQ_ENABLE),
+    Register("SEQUENCE.CONTROL", SEQUENCE_CONTROL),
+    Register("SEQUENCE.STATUS", SEQUENCE_STATUS),
+    Register("SEQUENCE.EVENT_COUNT", SEQUENCE_EVENT_COUNT),
+    Register("SEQUENCE.ACTIVE_EVENT", SEQUENCE_ACTIVE_EVENT),
+    Register("SEQUENCE.COMPLETED_SHOTS", SEQUENCE_COMPLETED_SHOTS),
+    Register("SEQUENCE.FAULT_INFO", SEQUENCE_FAULT_INFO),
+    Register("SEQUENCE.TIMEBASE_LO", SEQUENCE_TIMEBASE_LO),
+    Register("SEQUENCE.TIMEBASE_HI", SEQUENCE_TIMEBASE_HI),
+    Register("SEQUENCE.START_TIME_LO", SEQUENCE_START_TIME_LO),
+    Register("SEQUENCE.START_TIME_HI", SEQUENCE_START_TIME_HI),
+    Register("SEQUENCE.ELAPSED_LO", SEQUENCE_ELAPSED_LO),
+    Register("SEQUENCE.ELAPSED_HI", SEQUENCE_ELAPSED_HI),
 ]
 
 
 class DevMem32:
     def __init__(self, base: int, size: int) -> None:
+        if sys.byteorder != "little":
+            raise RuntimeError("Q-Crate MMIO tools require a little-endian CPU")
+        if base % ctypes.sizeof(ctypes.c_uint32) or size <= 0 or size % 4:
+            raise ValueError("MMIO base and size must be positive and 32-bit aligned")
+
         page_size = mmap.PAGESIZE
         page_base = base & ~(page_size - 1)
         page_offset = base - page_base
@@ -92,8 +123,11 @@ class DevMem32:
             mmap.PROT_READ | mmap.PROT_WRITE,
             offset=page_base,
         )
+        word_array = ctypes.c_uint32 * (map_size // ctypes.sizeof(ctypes.c_uint32))
+        self._words = word_array.from_buffer(self._mem)
 
     def close(self) -> None:
+        del self._words
         self._mem.close()
         os.close(self._fd)
 
@@ -105,14 +139,16 @@ class DevMem32:
 
     def read32(self, offset: int) -> int:
         self._check_offset(offset)
-        raw = self._mem[self._page_offset + offset:self._page_offset + offset + 4]
-        return struct.unpack_from("<I", raw)[0]
+        return int(self._words[self._word_index(offset)])
 
     def write32(self, offset: int, value: int) -> None:
         self._check_offset(offset)
-        self._mem[self._page_offset + offset:self._page_offset + offset + 4] = (
-            struct.pack("<I", value & 0xFFFF_FFFF)
-        )
+        # mmap slice assignment uses memcpy(), which may split or duplicate an
+        # MMIO store. A typed native word assignment emits one 32-bit access.
+        self._words[self._word_index(offset)] = value & 0xFFFF_FFFF
+
+    def _word_index(self, offset: int) -> int:
+        return (self._page_offset + offset) // ctypes.sizeof(ctypes.c_uint32)
 
     @staticmethod
     def _check_offset(offset: int) -> None:

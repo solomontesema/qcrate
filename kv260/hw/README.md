@@ -337,3 +337,155 @@ Return to a production build by omitting both diagnostic defines:
 ```bash
 python3 scripts/build.py --stage all
 ```
+
+## Pulse-sequencer Verilator test
+
+The pulse sequencer is split into independently useful blocks:
+
+```text
+qcrate_timebase              shared 64-bit 200 MHz monotonic clock
+qcrate_sequence_regs         100 MHz APB register and RAM interface
+qcrate_sequence_command_cdc  coherent control-to-stream command mailbox
+qcrate_sequence_ram          asymmetric XPM true dual-port event memory
+qcrate_sequence_engine       200 MHz validation and execution state machine
+qcrate_sequence_status_cdc   coherent stream-to-control status snapshots
+qcrate_sequence_event_cdc    lossless low-rate event pulse crossings
+```
+
+The engine takes the shared timebase as an input. Its soft reset clears only
+sequencer state and shot statistics; it does not reset the system timebase.
+Other timestamp producers can therefore use the same monotonic clock later.
+
+The engine validates the complete event table before arming, waits for a
+software or external trigger, and applies complete two-bit output states at
+absolute timestamps relative to the accepted trigger. Abort, soft reset,
+validation faults, and normal completion all return the outputs to zero.
+
+### APB sequencer page
+
+The page starts at system APB offset `0x2000`. Register offsets below are
+relative to that page:
+
+| Offset | Register | Access | Meaning |
+|---:|---|---|---|
+| `0x000` | `CONTROL` | RW/W1P | arm, start, abort, soft reset, external-trigger enable |
+| `0x004` | `STATUS` | RO | engine state, command busy, event-memory lock |
+| `0x008` | `EVENT_COUNT` | RW | number of valid events, 2 through 128 |
+| `0x00C` | `ACTIVE_EVENT` | RO | current event index |
+| `0x010` | `COMPLETED_SHOTS` | RO | successful shot count |
+| `0x014` | `FAULT_INFO` | RO | event index in bits 22:16 and fault code in bits 7:0 |
+| `0x018` | `TIMEBASE_LO` | RO | shared timebase low word; reading it latches the high word |
+| `0x01C` | `TIMEBASE_HI` | RO | high word latched by `TIMEBASE_LO` |
+| `0x020` | `START_TIME_LO` | RO | accepted-trigger time low word; latches high word |
+| `0x024` | `START_TIME_HI` | RO | latched start-time high word |
+| `0x028` | `ELAPSED_LO` | RO | per-shot elapsed ticks low word; latches high word |
+| `0x02C` | `ELAPSED_HI` | RO | latched elapsed-time high word |
+| `0x800-0xFFF` | `EVENT_MEMORY` | RW while unlocked | 128 events, four little-endian 32-bit words each |
+
+`CONTROL` bit 0 is `ARM`, bit 1 `START`, bit 2 `ABORT`, bit 3
+`SOFT_RESET`, and bit 8 `EXTERNAL_TRIGGER_ENABLE`. Command bits are
+write-one pulses and exactly zero or one command bit may be written per APB
+transfer. Register and event-memory side effects occur once at the first clock
+edge of an APB access phase. If a master extends that access phase, it does not
+repeat the command or RAM write; the next transfer remains distinct because APB
+places a setup phase (`PENABLE=0`) between transfers.
+
+`STATUS` bits 0 through 4 are `IDLE`, `VALIDATING`, `ARMED`, `BUSY`, and
+`FAULTED`; bit 8 is `COMMAND_BUSY`; bit 9 is `EVENT_MEMORY_LOCKED`.
+
+Each event occupies these four words in the event-memory window:
+
+```text
++0x0  timestamp[31:0]
++0x4  timestamp[63:32]
++0x8  output_state[31:0]
++0xC  flags[31:0]
+```
+
+The APB port sees 512 words of 32 bits, while the engine port reads 128 words
+of 128 bits. In Vivado this is an asymmetric `xpm_memory_tdpram`; Verilator
+uses a behaviorally equivalent fallback.
+
+An accepted `ARM` locks event memory immediately in the control domain, before
+the command can cross to 200 MHz. Completion or abort releases it through an
+event-toggle CDC. A validation fault leaves it locked until a soft-reset
+command has crossed and an idle status snapshot returns. Blocked memory access
+returns `PSLVERR` and `0xDEAD_BEEF`. This ownership protocol prevents software
+from changing records while validation or execution is reading them.
+
+Sequencer done, aborted, and fault events use central interrupt bits 2, 3, and
+4 respectively. Existing stream done and error events remain bits 0 and 1.
+
+Run a fast lint/elaboration check from the repository root:
+
+```bash
+verilator --lint-only --timing -Wall -Wno-DECLFILENAME \
+  kv260/hw/rtl/qcrate_timebase.sv \
+  kv260/hw/rtl/qcrate_sequence_engine.sv \
+  kv260/hw/tb/qcrate_sequence_engine_tb.sv
+```
+
+Run the focused self-checking simulation:
+
+```bash
+CCACHE_DISABLE=1 verilator --binary --timing -Wall -Wno-DECLFILENAME \
+  --top-module qcrate_sequence_engine_tb \
+  --Mdir /tmp/qcrate_sequence_engine_obj \
+  -o qcrate_sequence_engine_tb \
+  kv260/hw/rtl/qcrate_timebase.sv \
+  kv260/hw/rtl/qcrate_sequence_engine.sv \
+  kv260/hw/tb/qcrate_sequence_engine_tb.sv
+
+/tmp/qcrate_sequence_engine_obj/qcrate_sequence_engine_tb
+```
+
+Expected result:
+
+```text
+PASS: qcrate_sequence_engine_tb
+```
+
+`CCACHE_DISABLE=1` is only needed when the configured ccache temporary
+directory is unavailable or read-only. The `/tmp` output directory keeps
+generated C++ and simulator binaries outside the repository; Verilator
+translates the selected SystemVerilog into C++, compiles it, and runs the
+self-checking testbench.
+
+The test covers validation failures, consecutive-cycle events, software start,
+external trigger, exact timestamp behavior, abort-to-safe-low, completion, and
+the distinction between a global free-running timebase and per-shot elapsed
+time. It does not replace CDC review, Vivado synthesis, implementation timing,
+or on-board measurement of physical outputs.
+
+Run the integrated APB, RAM, CDC, and engine test:
+
+```bash
+CCACHE_DISABLE=1 verilator --binary --timing -Wall -Wno-DECLFILENAME \
+  --top-module qcrate_sequence_subsystem_tb \
+  --Mdir /tmp/qcrate_sequence_subsystem_obj \
+  -o qcrate_sequence_subsystem_tb \
+  kv260/hw/tb/qcrate_sequence_subsystem_tb.sv \
+  kv260/hw/rtl/qcrate_sequence_regs.sv \
+  kv260/hw/rtl/qcrate_sequence_ram.sv \
+  kv260/hw/rtl/qcrate_sequence_command_cdc.sv \
+  kv260/hw/rtl/qcrate_sequence_status_cdc.sv \
+  kv260/hw/rtl/qcrate_sequence_event_cdc.sv \
+  kv260/hw/rtl/qcrate_cdc_single.sv \
+  kv260/hw/rtl/qcrate_timebase.sv \
+  kv260/hw/rtl/qcrate_sequence_engine.sv
+
+/tmp/qcrate_sequence_subsystem_obj/qcrate_sequence_subsystem_tb
+```
+
+Expected result:
+
+```text
+PASS: qcrate_sequence_subsystem_tb
+```
+
+This test uploads and reads back events over APB, verifies command and status
+CDC, checks RAM ownership after arm, executes timestamped edges, observes done
+and abort events, and confirms that sequencer soft reset leaves the shared
+timebase running. Its first ARM deliberately holds the APB access phase for 12
+control-clock cycles and confirms that the register block issues only one
+command-mailbox request.

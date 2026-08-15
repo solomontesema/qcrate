@@ -29,6 +29,7 @@ module qcrate_top(
   logic              pl_clk0;
   logic              pl_clk1;
   logic              qcrate_irq;
+  logic [1:0]        qcrate_sequence_pulse;
 
     // ------------------------------------------------------------
     // Block design 
@@ -98,6 +99,10 @@ module qcrate_top(
         .m_axis_tvalid_o       (S_AXIS_S2MM_0_tvalid),
         .m_axis_tready_i       (S_AXIS_S2MM_0_tready),
         .m_axis_tlast_o        (S_AXIS_S2MM_0_tlast),
+
+        // External sequence trigger is added with the future board I/O.
+        .sequence_trigger_i    (1'b0),
+        .sequence_pulse_o      (qcrate_sequence_pulse),
 
         // Interrupt
         .irq_o                 (qcrate_irq)
