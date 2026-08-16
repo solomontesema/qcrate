@@ -45,6 +45,11 @@ Expected result: Verilator exits with code 0 and no `%Error` messages. This does
 
 ## Block-design clock partition
 
+![Q-Crate KV260 Vivado block design with Zynq UltraScale+ MPSoC, AXI DMA, SmartConnect, and AXI-to-APB control path](bd/kv260_bd.png)
+
+*Current reproducible KV260 block design. The exported Tcl in `bd/design_1.tcl`
+is the source of truth; this image is a visual reference.*
+
 The control path runs entirely on `pl_clk1` at 100 MHz:
 
 ```text
