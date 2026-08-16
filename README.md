@@ -23,9 +23,8 @@ Tcl, configuration, recipes, and scripts.
 | Sequence tooling | Standard-library Python compiler with a versioned, CRC-protected binary format |
 | Networking | Reproducible Ethernet topology and throughput-baseline tooling |
 
-The pulse sequencer has passed RTL, PetaLinux, and direct A53 control-path
-testing. Its final R5-owned upload and lifecycle path is currently undergoing
-board acceptance.
+The pulse sequencer has passed RTL, PetaLinux, direct A53 bring-up, and final
+R5-owned upload and lifecycle testing on the KV260.
 
 ## Architecture
 

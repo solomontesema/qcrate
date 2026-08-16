@@ -1787,10 +1787,11 @@ generated and staged by the Vitis flow before BitBake can build the
 
 ## Deterministic pulse-sequencer acceptance
 
-The first sequencer software slice deliberately uses A53 `/dev/mem` access.
-This proves the binary contract, APB register page, event RAM, CDC, validation,
-and PL execution before R5 firmware becomes the sole runtime owner. It is a
-bring-up interface, not the final heterogeneous-control architecture.
+R5-0 is the sole runtime owner of the SEQUENCE APB register page and event RAM.
+The A53 `qcrate-sequence` tool validates the `.qseq` image and sends typed RPMsg
+requests; R5 repeats the safety checks, writes and reads back every event word,
+checks the CRC, and supervises ARM, START, ABORT, and RESET. This is the final
+heterogeneous ownership model, not the earlier `/dev/mem` bring-up path.
 
 The development PC compiles readable JSON pulse intervals into the versioned,
 CRC-protected `.qseq` format:
@@ -1813,24 +1814,38 @@ tick 700   state 01
 tick 1000  state 00
 ```
 
-The target `qcrate-sequence` parser independently verifies the magic, version,
-record sizes, 200 MHz tick rate, exact file size, payload CRC, increasing
-timestamps, reserved fields, state changes, and safe final state before opening
-`/dev/mem`. During upload it reads back every 32-bit event-memory word and the
-event count.
+The target parser independently verifies the magic, version, record sizes,
+200 MHz tick rate, exact file size, payload CRC, increasing timestamps,
+reserved fields, state changes, and safe final state before opening the RPMsg
+endpoint. R5 performs the authoritative validation and APB readback.
 
-After an XSA change, rebuild and deploy the complete fixed platform using the
-normal automated flow. Replace the example SD-card device after checking
+This ownership change does not alter RTL, the block design, XSA, device tree,
+or kernel. Rebuild and stage the R5 ELF first, then rebuild the two affected
+Yocto recipes and image. Replace the example SD-card device after checking
 `lsblk`:
 
 ```bash
 cd /tools/fpga_projects/qcrate
+python3 kv260/vitis/vitis_flow.py all
+
 source /tools/Xilinx/PetaLinux/2024.2/settings.sh
-python3 kv260/linux/petalinux/scripts/petalinux_flow.py all \
+cd kv260/linux/petalinux/qcrate-kv260
+petalinux-build -c qcrate-openamp
+petalinux-build -c qcrate-tools
+cd /tools/fpga_projects/qcrate
+
+python3 kv260/linux/petalinux/scripts/petalinux_flow.py build
+python3 kv260/linux/petalinux/scripts/petalinux_flow.py package
+python3 kv260/linux/petalinux/scripts/petalinux_flow.py deploy \
   --device /dev/mmcblk0
 ```
 
-For a focused recipe diagnosis before the full image build:
+Do not run the flow's `configure` action for this software-only change: the
+accepted XSA and generated SDT are unchanged. The Vitis build is necessary
+because the R5 service and shared ABI changed. A public protocol change must
+always rebuild both `qcrate-openamp` and `qcrate-tools` before the image.
+
+For a focused target-tool diagnosis:
 
 ```bash
 cd /tools/fpga_projects/qcrate/kv260/linux/petalinux/qcrate-kv260
@@ -1863,24 +1878,23 @@ sudo qcrate-sequence status
 Expected result:
 
 ```text
-PASS loaded and verified 4 events
-PASS armed 4 events
-PASS shot 1
+PASS R5 loaded and committed 4 events
+PASS R5 armed 4 events
+PASS R5 shot 1
 PASS Q-Crate sequencer control-path acceptance
 ```
 
-If the tool reports fault 9 before printing `PASS armed`, the event image is
-not the failed check: upload, CRC, and readback have already completed. Fault 9
-means the engine received a command that was illegal for its current state,
-such as a repeated ARM during validation. Do not implement MMIO writes with a
-Python mmap slice: CPython delegates the copy to `memcpy()`, whose optimized
-small-copy implementation may issue more than one device-memory store. This
-was observed on the KV260 as two ARM transactions. A single BusyBox `devmem`
-write armed the same uploaded sequence correctly. `qcrate-apb` and
-`qcrate-sequence` therefore use typed native `ctypes.c_uint32` accesses. The
-sequencer APB register block additionally qualifies side effects once per APB
-access phase. Use `sudo qcrate-sequence reset` to return a faulted engine to
-idle before the next test.
+This final ownership path passed on the KV260: R5 accepted and committed the
+four-event image, armed and completed one shot, returned the engine to idle,
+and preserved the existing APB and DMA acceptance tests.
+
+If R5 reports fault 9 before `PASS R5 armed`, the PL received a command that was
+illegal for its state. Run `sudo qcrate-sequence status`, then reset before the
+next upload. The previous A53 bring-up exposed why ownership matters: an mmap
+slice could issue multiple device-memory stores and accidentally repeat ARM.
+The production client performs no sequencer MMIO; one typed RPMsg command is
+decoded into one R5 APB write. The PL also qualifies side effects once per APB
+access phase.
 
 Individual lifecycle commands are also available:
 
@@ -1893,7 +1907,7 @@ sudo qcrate-sequence reset
 sudo qcrate-sequence status
 ```
 
-`arm --external-trigger` is implemented in the register protocol but must not
+`arm --external-trigger` is implemented in the RPMsg protocol but must not
 be used on the current KV260 wrapper because `sequence_trigger_i` is tied low.
 Likewise, `qcrate-sequence test` proves control-path execution, event validation,
 safe completion, and shot accounting; it does not prove physical pulse timing.
@@ -1901,7 +1915,8 @@ The two pulse outputs are still internal to `qcrate_top` and have no board pin
 or XDC assignment. Physical output routing and measurement form a separate
 hardware milestone.
 
-The event-memory ownership contract is visible in `STATUS` bit 9. `ARM` locks
-RAM immediately. Done or abort releases it. A validation fault keeps it locked
-until `qcrate-sequence reset` completes. Attempts to load while locked are
-rejected in software and return APB `PSLVERR` in hardware.
+The event-memory ownership contract is visible in PL `STATUS` bit 9. `ARM`
+locks RAM immediately. Done or abort releases it. A validation fault keeps it
+locked until `qcrate-sequence reset` completes. R5 additionally reports upload
+active and committed in returned status bits 30 and 31. `qcrate-apb` permits
+diagnostic reads of the page but rejects sequence-page writes by default.

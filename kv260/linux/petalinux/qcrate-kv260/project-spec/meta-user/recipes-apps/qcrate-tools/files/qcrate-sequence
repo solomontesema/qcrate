@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Load and control deterministic Q-Crate pulse sequences through APB."""
+"""Load and control deterministic Q-Crate pulse sequences through R5 RPMsg."""
 from __future__ import annotations
 
 import argparse
-import ctypes
-import mmap
 import os
+import select
 import struct
 import sys
 import time
@@ -14,8 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-APB_BASE = 0xA001_0000
-APB_SIZE = 0x0001_0000
 FPGA_FIRMWARE_NAME = "qcrate_kv260.bit.bin"
 FPGA_FIRMWARE_NAME_PATH = "/proc/device-tree/fpga-region/firmware-name"
 STREAM_CLOCK_HZ = 200_000_000
@@ -33,28 +30,38 @@ MAX_EVENTS = 128
 OUTPUT_MASK = 0x3
 HEADER = struct.Struct("<4sHHIIIIQ")
 EVENT = struct.Struct("<QII")
-WORD = struct.Struct("<I")
 
-SEQUENCE_BASE = 0x2000
-SEQ_CONTROL = SEQUENCE_BASE + 0x000
-SEQ_STATUS = SEQUENCE_BASE + 0x004
-SEQ_EVENT_COUNT = SEQUENCE_BASE + 0x008
-SEQ_ACTIVE_EVENT = SEQUENCE_BASE + 0x00C
-SEQ_COMPLETED_SHOTS = SEQUENCE_BASE + 0x010
-SEQ_FAULT_INFO = SEQUENCE_BASE + 0x014
-SEQ_TIMEBASE_LO = SEQUENCE_BASE + 0x018
-SEQ_TIMEBASE_HI = SEQUENCE_BASE + 0x01C
-SEQ_START_TIME_LO = SEQUENCE_BASE + 0x020
-SEQ_START_TIME_HI = SEQUENCE_BASE + 0x024
-SEQ_ELAPSED_LO = SEQUENCE_BASE + 0x028
-SEQ_ELAPSED_HI = SEQUENCE_BASE + 0x02C
-SEQ_EVENT_MEMORY = SEQUENCE_BASE + 0x800
+RPMSG_SYSFS_CLASS = Path("/sys/class/rpmsg")
+RPMSG_SERVICE_NAME = "qcrate-control"
+RPMSG_MAGIC = 0x5152_4350
+RPMSG_ABI_VERSION = 2
+RPMSG_PAYLOAD_WORDS = 11
+RPMSG_MESSAGE = struct.Struct("<IHHIIi11I")
 
-CONTROL_ARM = 1 << 0
-CONTROL_START = 1 << 1
-CONTROL_ABORT = 1 << 2
-CONTROL_SOFT_RESET = 1 << 3
-CONTROL_EXTERNAL_TRIGGER_ENABLE = 1 << 8
+CMD_SEQ_LOAD_BEGIN = 5
+CMD_SEQ_LOAD_EVENT = 6
+CMD_SEQ_LOAD_COMMIT = 7
+CMD_SEQ_GET_STATUS = 8
+CMD_SEQ_ARM = 9
+CMD_SEQ_START = 10
+CMD_SEQ_ABORT = 11
+CMD_SEQ_RESET = 12
+
+R5_STATUS_NAMES = {
+    -1: "bad protocol magic",
+    -2: "unsupported protocol ABI",
+    -3: "bad payload length",
+    -4: "unknown command",
+    -5: "wrong PL device identity",
+    -6: "scratch-register verification failed",
+    -7: "operation is illegal in the current state",
+    -8: "unexpected sequence event index",
+    -9: "invalid sequence event",
+    -10: "sequence CRC mismatch",
+    -11: "PL event-memory verification failed",
+    -12: "PL sequencer reported a fault",
+    -13: "R5 timed out waiting for the PL sequencer",
+}
 
 STATUS_IDLE = 1 << 0
 STATUS_VALIDATING = 1 << 1
@@ -63,6 +70,8 @@ STATUS_BUSY = 1 << 3
 STATUS_FAULTED = 1 << 4
 STATUS_COMMAND_BUSY = 1 << 8
 STATUS_MEMORY_LOCKED = 1 << 9
+STATUS_LOAD_ACTIVE = 1 << 30
+STATUS_COMMITTED = 1 << 31
 
 FAULT_NAMES = {
     0: "none",
@@ -80,6 +89,32 @@ FAULT_NAMES = {
 
 class SequenceError(ValueError):
     """Raised when a sequence image or hardware state is invalid."""
+
+
+class R5ServiceError(RuntimeError):
+    """Raised when the R5 rejects a valid RPMsg transaction."""
+
+    def __init__(self, status: int, payload: tuple[int, ...]) -> None:
+        self.status = status
+        self.payload = payload
+        detail = R5_STATUS_NAMES.get(status, "unknown R5 service error")
+        if status == -9 and len(payload) >= 2:
+            fault = FAULT_NAMES.get(payload[1], "unknown validation fault")
+            detail = f"event {payload[0]} failed validation: {fault}"
+        elif status == -8 and len(payload) >= 2:
+            detail = f"received event {payload[0]}, expected event {payload[1]}"
+        elif status == -10 and len(payload) >= 2:
+            detail = (
+                f"sequence CRC mismatch: expected 0x{payload[0]:08x}, "
+                f"R5 calculated 0x{payload[1]:08x}"
+            )
+        elif status == -12 and len(payload) == RPMSG_PAYLOAD_WORDS:
+            fault_info = payload[4]
+            fault_code = fault_info & 0xFF
+            fault_event = (fault_info >> 16) & 0x7F
+            fault = FAULT_NAMES.get(fault_code, "unknown hardware fault")
+            detail = f"PL fault {fault_code} ({fault}) at event {fault_event}"
+        super().__init__(f"R5 status {status}: {detail}")
 
 
 @dataclass(frozen=True)
@@ -136,74 +171,101 @@ class SequenceStatus:
     def memory_locked(self) -> bool:
         return bool(self.raw & STATUS_MEMORY_LOCKED)
 
+    @property
+    def load_active(self) -> bool:
+        return bool(self.raw & STATUS_LOAD_ACTIVE)
 
-class DevMem32:
-    def __init__(self, base: int, size: int) -> None:
-        if sys.byteorder != "little":
-            raise RuntimeError("Q-Crate MMIO tools require a little-endian CPU")
-        if base % ctypes.sizeof(ctypes.c_uint32) or size <= 0 or size % 4:
-            raise ValueError("MMIO base and size must be positive and 32-bit aligned")
+    @property
+    def committed(self) -> bool:
+        return bool(self.raw & STATUS_COMMITTED)
 
-        page_size = mmap.PAGESIZE
-        page_base = base & ~(page_size - 1)
-        page_offset = base - page_base
-        map_size = page_offset + size
-        self._page_offset = page_offset
-        self._fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC | os.O_CLOEXEC)
-        self._mem = mmap.mmap(
-            self._fd,
-            map_size,
-            mmap.MAP_SHARED,
-            mmap.PROT_READ | mmap.PROT_WRITE,
-            offset=page_base,
-        )
-        word_array = ctypes.c_uint32 * (map_size // ctypes.sizeof(ctypes.c_uint32))
-        self._words = word_array.from_buffer(self._mem)
+
+class RpmsgTransport:
+    def __init__(self, device: Path, timeout_ms: int) -> None:
+        self._fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+        self._timeout_ms = timeout_ms
+        self._transaction_id = (time.monotonic_ns() ^ os.getpid()) & 0xFFFF_FFFF
 
     def close(self) -> None:
-        del self._words
-        self._mem.close()
         os.close(self._fd)
 
-    def __enter__(self) -> "DevMem32":
+    def __enter__(self) -> "RpmsgTransport":
         return self
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:
         self.close()
 
-    def read32(self, offset: int) -> int:
-        self._check_offset(offset)
-        return int(self._words[self._word_index(offset)])
+    def exchange(self, command: int, payload: tuple[int, ...] = ()) -> tuple[int, ...]:
+        if len(payload) > RPMSG_PAYLOAD_WORDS:
+            raise ValueError("RPMsg payload exceeds eleven words")
+        if any(value < 0 or value > 0xFFFF_FFFF for value in payload):
+            raise ValueError("RPMsg payload words must be unsigned 32-bit values")
 
-    def write32(self, offset: int, value: int) -> None:
-        self._check_offset(offset)
-        # mmap slice assignment uses memcpy(), which may split or duplicate an
-        # MMIO store. A typed native word assignment emits one 32-bit access.
-        self._words[self._word_index(offset)] = value & 0xFFFF_FFFF
+        self._transaction_id = (self._transaction_id + 1) & 0xFFFF_FFFF
+        padded = payload + (0,) * (RPMSG_PAYLOAD_WORDS - len(payload))
+        request = RPMSG_MESSAGE.pack(
+            RPMSG_MAGIC,
+            RPMSG_ABI_VERSION,
+            command,
+            self._transaction_id,
+            len(payload),
+            0,
+            *padded,
+        )
+        if os.write(self._fd, request) != len(request):
+            raise OSError("short RPMsg request write")
 
-    def _word_index(self, offset: int) -> int:
-        return (self._page_offset + offset) // ctypes.sizeof(ctypes.c_uint32)
+        poller = select.poll()
+        poller.register(self._fd, select.POLLIN)
+        events = poller.poll(self._timeout_ms)
+        if not events:
+            raise TimeoutError(
+                f"R5 response timed out after {self._timeout_ms} ms"
+            )
+        if not (events[0][1] & select.POLLIN):
+            raise OSError(f"RPMsg endpoint poll error 0x{events[0][1]:x}")
 
-    @staticmethod
-    def _check_offset(offset: int) -> None:
-        if offset < 0 or offset % WORD.size:
-            raise ValueError(f"unaligned APB offset: 0x{offset:x}")
-        if offset > APB_SIZE - WORD.size:
-            raise ValueError(f"APB offset is outside the mapped window: 0x{offset:x}")
+        contents = os.read(self._fd, RPMSG_MESSAGE.size)
+        if len(contents) != RPMSG_MESSAGE.size:
+            raise OSError(
+                f"short RPMsg response: {len(contents)} of {RPMSG_MESSAGE.size} bytes"
+            )
+        unpacked = RPMSG_MESSAGE.unpack(contents)
+        magic, abi, response_command, transaction_id, words, status = unpacked[:6]
+        if (
+            magic != RPMSG_MAGIC
+            or abi != RPMSG_ABI_VERSION
+            or response_command != command
+            or transaction_id != self._transaction_id
+            or words > RPMSG_PAYLOAD_WORDS
+        ):
+            raise RuntimeError("invalid R5 RPMsg response header")
+        response_payload = tuple(unpacked[6:6 + words])
+        if status != 0:
+            raise R5ServiceError(status, response_payload)
+        return response_payload
 
 
-def parse_int(text: str) -> int:
-    return int(text, 0)
-
-
-def read_text(path: str) -> str:
+def read_text(path: str | Path) -> str:
     with open(path, "r", encoding="ascii") as stream:
         return stream.read().rstrip("\0\n")
 
 
-def preflight_platform(base: int) -> None:
-    if base != APB_BASE:
-        return
+def discover_endpoint() -> Path:
+    try:
+        candidates = sorted(RPMSG_SYSFS_CLASS.glob("rpmsg*"))
+    except OSError as exc:
+        raise RuntimeError("cannot inspect the RPMsg class") from exc
+    for candidate in candidates:
+        try:
+            if read_text(candidate / "name") == RPMSG_SERVICE_NAME:
+                return Path("/dev") / candidate.name
+        except OSError:
+            continue
+    raise RuntimeError(f"{RPMSG_SERVICE_NAME} RPMsg endpoint is unavailable")
+
+
+def preflight_platform() -> None:
     try:
         firmware_name = read_text(FPGA_FIRMWARE_NAME_PATH)
     except OSError as exc:
@@ -292,25 +354,25 @@ def decode_image(contents: bytes) -> SequenceImage:
     return SequenceImage(events, payload, actual_crc)
 
 
-def read64(regs: DevMem32, low_offset: int, high_offset: int) -> int:
-    low = regs.read32(low_offset)
-    high = regs.read32(high_offset)
-    return (high << 32) | low
-
-
-def read_status(regs: DevMem32) -> SequenceStatus:
-    fault_info = regs.read32(SEQ_FAULT_INFO)
+def status_from_payload(payload: tuple[int, ...]) -> SequenceStatus:
+    if len(payload) != 11:
+        raise RuntimeError(f"R5 returned {len(payload)} status words, expected 11")
+    fault_info = payload[4]
     return SequenceStatus(
-        raw=regs.read32(SEQ_STATUS),
-        event_count=regs.read32(SEQ_EVENT_COUNT),
-        active_event=regs.read32(SEQ_ACTIVE_EVENT),
-        completed_shots=regs.read32(SEQ_COMPLETED_SHOTS),
+        raw=payload[0],
+        event_count=payload[1],
+        active_event=payload[2],
+        completed_shots=payload[3],
         fault_code=fault_info & 0xFF,
         fault_event=(fault_info >> 16) & 0x7F,
-        timebase=read64(regs, SEQ_TIMEBASE_LO, SEQ_TIMEBASE_HI),
-        start_time=read64(regs, SEQ_START_TIME_LO, SEQ_START_TIME_HI),
-        elapsed_ticks=read64(regs, SEQ_ELAPSED_LO, SEQ_ELAPSED_HI),
+        timebase=(payload[6] << 32) | payload[5],
+        start_time=(payload[8] << 32) | payload[7],
+        elapsed_ticks=(payload[10] << 32) | payload[9],
     )
+
+
+def read_status(transport) -> SequenceStatus:
+    return status_from_payload(transport.exchange(CMD_SEQ_GET_STATUS))
 
 
 def state_name(status: SequenceStatus) -> str:
@@ -327,6 +389,8 @@ def state_name(status: SequenceStatus) -> str:
 def print_status(status: SequenceStatus) -> None:
     print(f"state              : {state_name(status)}")
     print(f"status raw         : 0x{status.raw:08x}")
+    print(f"R5 load active     : {'yes' if status.load_active else 'no'}")
+    print(f"R5 table committed : {'yes' if status.committed else 'no'}")
     print(f"command busy       : {'yes' if status.command_busy else 'no'}")
     print(f"event memory locked: {'yes' if status.memory_locked else 'no'}")
     print(f"event count        : {status.event_count}")
@@ -343,7 +407,7 @@ def print_status(status: SequenceStatus) -> None:
 
 
 def wait_for(
-    regs: DevMem32,
+    transport,
     predicate,
     *,
     timeout_ms: int,
@@ -352,7 +416,7 @@ def wait_for(
 ) -> SequenceStatus:
     deadline = time.monotonic() + timeout_ms / 1000.0
     while True:
-        status = read_status(regs)
+        status = read_status(transport)
         if fail_on_fault and status.faulted:
             fault_name = FAULT_NAMES.get(status.fault_code, "unknown fault")
             raise RuntimeError(
@@ -369,146 +433,131 @@ def wait_for(
         time.sleep(0.001)
 
 
-def require_command_ready(regs: DevMem32) -> SequenceStatus:
-    status = read_status(regs)
-    if status.command_busy:
-        raise RuntimeError("a sequencer command is still crossing clock domains")
-    return status
-
-
-def load_image(regs: DevMem32, image: SequenceImage) -> None:
-    status = require_command_ready(regs)
-    if not status.idle or status.memory_locked:
+def load_image(transport, image: SequenceImage) -> None:
+    status = read_status(transport)
+    if not status.idle or status.memory_locked or status.faulted:
         raise RuntimeError(
             f"event memory is not writable: state={state_name(status)}, "
             f"locked={'yes' if status.memory_locked else 'no'}"
         )
 
-    words = tuple(
-        WORD.unpack_from(image.payload, offset)[0]
-        for offset in range(0, len(image.payload), WORD.size)
+    response = transport.exchange(
+        CMD_SEQ_LOAD_BEGIN, (len(image.events), image.crc32)
     )
-    for index, value in enumerate(words):
-        regs.write32(SEQ_EVENT_MEMORY + index * WORD.size, value)
-    regs.write32(SEQ_EVENT_COUNT, len(image.events))
+    if response != (len(image.events), image.crc32):
+        raise RuntimeError("R5 load-begin acknowledgement mismatch")
 
-    for index, expected in enumerate(words):
-        actual = regs.read32(SEQ_EVENT_MEMORY + index * WORD.size)
-        if actual != expected:
-            raise RuntimeError(
-                f"event-memory readback mismatch at word {index}: "
-                f"expected 0x{expected:08x}, got 0x{actual:08x}"
-            )
-    actual_count = regs.read32(SEQ_EVENT_COUNT)
-    if actual_count != len(image.events):
-        raise RuntimeError(
-            f"EVENT_COUNT readback is {actual_count}, expected {len(image.events)}"
+    for index, event in enumerate(image.events):
+        response = transport.exchange(
+            CMD_SEQ_LOAD_EVENT,
+            (
+                index,
+                event.timestamp & 0xFFFF_FFFF,
+                event.timestamp >> 32,
+                event.output_state,
+                event.flags,
+            ),
         )
+        if response != (index,):
+            raise RuntimeError(f"R5 event {index} acknowledgement mismatch")
+
+    response = transport.exchange(CMD_SEQ_LOAD_COMMIT)
+    if response != (len(image.events), image.crc32):
+        raise RuntimeError("R5 load-commit acknowledgement mismatch")
+    status = read_status(transport)
+    if not status.committed or status.event_count != len(image.events):
+        raise RuntimeError("R5 did not commit the complete event table")
     print(
-        f"PASS loaded and verified {len(image.events)} events "
+        f"PASS R5 loaded and committed {len(image.events)} events "
         f"({len(image.payload)} bytes, CRC 0x{image.crc32:08x})"
     )
 
 
-def command_arm(regs: DevMem32, timeout_ms: int, external_trigger: bool) -> None:
-    status = require_command_ready(regs)
-    if not status.idle or status.memory_locked:
-        raise RuntimeError("sequencer must be idle with event memory unlocked before arm")
-    control = CONTROL_ARM
-    if external_trigger:
-        control |= CONTROL_EXTERNAL_TRIGGER_ENABLE
-    regs.write32(SEQ_CONTROL, control)
-    status = wait_for(
-        regs,
-        lambda value: value.armed,
-        timeout_ms=timeout_ms,
-        description="arm-time validation",
+def command_arm(transport, timeout_ms: int, external_trigger: bool) -> None:
+    status = read_status(transport)
+    if not status.committed:
+        raise RuntimeError("R5 has no committed sequence table")
+    status = status_from_payload(
+        transport.exchange(CMD_SEQ_ARM, (int(external_trigger),))
     )
-    print(f"PASS armed {status.event_count} events")
-
-
-def command_start(regs: DevMem32, timeout_ms: int) -> SequenceStatus:
-    status = require_command_ready(regs)
     if not status.armed:
-        raise RuntimeError(f"sequencer is {state_name(status)}, not armed")
+        status = wait_for(
+            transport,
+            lambda value: value.armed,
+            timeout_ms=timeout_ms,
+            description="R5-mediated arm-time validation",
+        )
+    print(f"PASS R5 armed {status.event_count} events")
+
+
+def command_start(transport, timeout_ms: int) -> SequenceStatus:
+    status = read_status(transport)
+    if not status.armed or not status.committed:
+        raise RuntimeError(f"sequencer is {state_name(status)}, not R5-owned and armed")
     completed_before = status.completed_shots
-    regs.write32(SEQ_CONTROL, CONTROL_START)
-    status = wait_for(
-        regs,
-        lambda value: value.completed_shots != completed_before,
-        timeout_ms=timeout_ms,
-        description="sequence completion",
-    )
+    status = status_from_payload(transport.exchange(CMD_SEQ_START))
+    if status.completed_shots == completed_before:
+        status = wait_for(
+            transport,
+            lambda value: value.completed_shots != completed_before,
+            timeout_ms=timeout_ms,
+            description="sequence completion reported by R5",
+        )
     if not status.idle or status.memory_locked:
         status = wait_for(
-            regs,
+            transport,
             lambda value: value.idle and not value.memory_locked,
             timeout_ms=timeout_ms,
-            description="event-memory release",
+            description="R5-observed event-memory release",
         )
     print(
-        f"PASS shot {status.completed_shots}; start={status.start_time}, "
+        f"PASS R5 shot {status.completed_shots}; start={status.start_time}, "
         f"elapsed={status.elapsed_ticks} ticks"
     )
     return status
 
 
-def command_abort(regs: DevMem32, timeout_ms: int) -> None:
-    status = require_command_ready(regs)
-    if status.idle:
-        raise RuntimeError("sequencer is already idle")
-    regs.write32(SEQ_CONTROL, CONTROL_ABORT)
-    wait_for(
-        regs,
-        lambda value: value.idle and not value.memory_locked,
-        timeout_ms=timeout_ms,
-        description="abort and event-memory release",
-    )
-    print("PASS abort returned the sequencer to idle")
+def command_abort(transport, _timeout_ms: int) -> None:
+    status = status_from_payload(transport.exchange(CMD_SEQ_ABORT))
+    if not status.idle or status.memory_locked:
+        raise RuntimeError("R5 abort did not return the sequencer to idle")
+    print("PASS R5 abort returned the sequencer to idle")
 
 
-def command_reset(regs: DevMem32, timeout_ms: int) -> None:
-    require_command_ready(regs)
-    regs.write32(SEQ_CONTROL, CONTROL_SOFT_RESET)
-    status = wait_for(
-        regs,
-        lambda value: value.idle and not value.memory_locked and
-                      not value.command_busy,
-        timeout_ms=timeout_ms,
-        description="sequencer soft reset",
-        fail_on_fault=False,
-    )
-    if status.fault_code != 0:
-        raise RuntimeError("fault code did not clear after soft reset")
-    print("PASS sequencer reset; shared timebase was not reset")
+def command_reset(transport, _timeout_ms: int) -> SequenceStatus:
+    before = read_status(transport)
+    status = status_from_payload(transport.exchange(CMD_SEQ_RESET))
+    if not status.idle or status.memory_locked or status.fault_code != 0:
+        raise RuntimeError("R5 reset did not clear the sequencer state")
+    if status.timebase <= before.timebase:
+        status = read_status(transport)
+    if status.timebase <= before.timebase:
+        raise RuntimeError("shared timebase did not advance across sequencer reset")
+    print("PASS R5 reset sequencer state; shared timebase was not reset")
+    return status
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--base",
-        type=parse_int,
-        default=APB_BASE,
-        help="physical APB base address, default: 0xA0010000",
+        "--device",
+        type=Path,
+        help="rpmsg_char device; default: discover the qcrate-control endpoint",
     )
     parser.add_argument(
-        "--timeout-ms", type=int, default=2000, help="state-transition timeout"
+        "--timeout-ms", type=int, default=2000, help="RPMsg and state timeout"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("status", help="print sequencer status and timestamps")
-
+    subparsers.add_parser("status", help="read R5-mediated sequencer status")
     load_parser = subparsers.add_parser("load", help="validate and upload a .qseq")
     load_parser.add_argument("image", type=Path)
-
-    arm_parser = subparsers.add_parser("arm", help="validate hardware table and arm")
+    arm_parser = subparsers.add_parser("arm", help="ask R5 to validate and arm")
     arm_parser.add_argument("--external-trigger", action="store_true")
-
-    subparsers.add_parser("start", help="start an armed sequence and wait for completion")
-    subparsers.add_parser("abort", help="abort validation, armed, or running state")
-    subparsers.add_parser("reset", help="soft-reset sequencer state, not the timebase")
-
+    subparsers.add_parser("start", help="ask R5 to start and wait for completion")
+    subparsers.add_parser("abort", help="ask R5 to abort the active sequence")
+    subparsers.add_parser("reset", help="ask R5 to soft-reset sequencer state")
     test_parser = subparsers.add_parser(
-        "test", help="load, arm, start, and verify one completed shot"
+        "test", help="R5-load, arm, start, and verify one completed shot"
     )
     test_parser.add_argument("image", type=Path)
     return parser.parse_args()
@@ -524,28 +573,30 @@ def main() -> int:
         image = None
         if args.command in {"load", "test"}:
             image = decode_image(args.image.read_bytes())
-        preflight_platform(args.base)
-        with DevMem32(args.base, APB_SIZE) as regs:
+        preflight_platform()
+        device = args.device if args.device is not None else discover_endpoint()
+        with RpmsgTransport(device, args.timeout_ms) as transport:
             if args.command == "status":
-                print_status(read_status(regs))
+                print_status(read_status(transport))
             elif args.command == "load":
-                load_image(regs, image)
+                load_image(transport, image)
             elif args.command == "arm":
-                command_arm(regs, args.timeout_ms, args.external_trigger)
+                command_arm(transport, args.timeout_ms, args.external_trigger)
             elif args.command == "start":
-                command_start(regs, args.timeout_ms)
+                command_start(transport, args.timeout_ms)
             elif args.command == "abort":
-                command_abort(regs, args.timeout_ms)
+                command_abort(transport, args.timeout_ms)
             elif args.command == "reset":
-                command_reset(regs, args.timeout_ms)
+                command_reset(transport, args.timeout_ms)
             elif args.command == "test":
-                load_image(regs, image)
-                timebase_before = read_status(regs).timebase
-                command_arm(regs, args.timeout_ms, False)
-                final_status = command_start(regs, args.timeout_ms)
+                command_reset(transport, args.timeout_ms)
+                load_image(transport, image)
+                timebase_before = read_status(transport).timebase
+                command_arm(transport, args.timeout_ms, False)
+                final_status = command_start(transport, args.timeout_ms)
                 if final_status.timebase <= timebase_before:
                     raise RuntimeError("shared timebase did not advance")
-                print("PASS Q-Crate sequencer control-path acceptance")
+                print("PASS R5-owned sequencer control-path acceptance")
             else:
                 raise AssertionError(f"unhandled command {args.command}")
     except (OSError, RuntimeError, SequenceError, TimeoutError, ValueError) as exc:

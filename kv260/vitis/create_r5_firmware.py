@@ -56,6 +56,10 @@ def replace_template_application() -> None:
         REPO_ROOT / "common" / "protocol" / "qcrate_protocol.h",
         source_dir / "qcrate_protocol.h",
     )
+    shutil.copy2(
+        REPO_ROOT / "common" / "sequence" / "qcrate_sequence_format.h",
+        source_dir / "qcrate_sequence_format.h",
+    )
 
 
 def correct_generated_ipi_interrupt() -> None:

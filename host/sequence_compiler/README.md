@@ -58,6 +58,7 @@ python3 -m unittest discover -s host/sequence_compiler/tests -v
 Expected example events are channel 0 high at tick 0, both channels high at
 tick 400, channel 1 low at tick 700, and both channels low at tick 1000.
 
-The `.qseq` file is deliberately small and deterministic. Later Linux code will
-send it to R5 in ordered RPMsg chunks; Linux will not write the sequencer APB
-page directly.
+The `.qseq` file is deliberately small and deterministic. The target
+`qcrate-sequence` client sends its header followed by one ordered event per
+RPMsg request. Linux does not write the sequencer APB page directly; R5-0
+validates the upload and owns that page.

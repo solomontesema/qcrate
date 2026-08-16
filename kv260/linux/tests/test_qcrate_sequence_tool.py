@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
-import inspect
-import mmap
-import os
 import sys
 import unittest
-from unittest import mock
 from pathlib import Path
 
 
@@ -40,27 +36,49 @@ def load_target_tool():
 target = load_target_tool()
 
 
-class FakeRegisters:
+class FakeTransport:
     def __init__(self) -> None:
-        self.values = {
-            target.SEQ_STATUS: target.STATUS_IDLE,
-            target.SEQ_EVENT_COUNT: 0,
-            target.SEQ_ACTIVE_EVENT: 0,
-            target.SEQ_COMPLETED_SHOTS: 0,
-            target.SEQ_FAULT_INFO: 0,
-            target.SEQ_TIMEBASE_LO: 1,
-            target.SEQ_TIMEBASE_HI: 0,
-            target.SEQ_START_TIME_LO: 0,
-            target.SEQ_START_TIME_HI: 0,
-            target.SEQ_ELAPSED_LO: 0,
-            target.SEQ_ELAPSED_HI: 0,
-        }
+        self.raw_status = target.STATUS_IDLE
+        self.event_count = 0
+        self.expected_count = 0
+        self.expected_crc = 0
+        self.events: list[tuple[int, ...]] = []
+        self.calls: list[tuple[int, tuple[int, ...]]] = []
 
-    def read32(self, offset: int) -> int:
-        return self.values.get(offset, 0)
+    def _status(self) -> tuple[int, ...]:
+        return (
+            self.raw_status,
+            self.event_count,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
 
-    def write32(self, offset: int, value: int) -> None:
-        self.values[offset] = value & 0xFFFF_FFFF
+    def exchange(
+        self, command: int, payload: tuple[int, ...] = ()
+    ) -> tuple[int, ...]:
+        self.calls.append((command, payload))
+        if command == target.CMD_SEQ_GET_STATUS:
+            return self._status()
+        if command == target.CMD_SEQ_LOAD_BEGIN:
+            self.expected_count, self.expected_crc = payload
+            self.events = []
+            self.raw_status = target.STATUS_IDLE | target.STATUS_LOAD_ACTIVE
+            return payload
+        if command == target.CMD_SEQ_LOAD_EVENT:
+            self.events.append(payload)
+            return (payload[0],)
+        if command == target.CMD_SEQ_LOAD_COMMIT:
+            self.event_count = self.expected_count
+            self.raw_status = target.STATUS_IDLE | target.STATUS_COMMITTED
+            return (self.expected_count, self.expected_crc)
+        raise AssertionError(f"unexpected command {command}")
 
 
 class TargetFormatTests(unittest.TestCase):
@@ -91,44 +109,49 @@ class TargetFormatTests(unittest.TestCase):
 
     def test_upload_preserves_little_endian_event_words(self) -> None:
         image = target.decode_image(self.encoded)
-        regs = FakeRegisters()
-        target.load_image(regs, image)
+        transport = FakeTransport()
+        target.load_image(transport, image)
 
-        expected_words = [
-            target.WORD.unpack_from(image.payload, offset)[0]
-            for offset in range(0, len(image.payload), target.WORD.size)
+        expected_requests = [
+            (
+                index,
+                event.timestamp & 0xFFFF_FFFF,
+                event.timestamp >> 32,
+                event.output_state,
+                event.flags,
+            )
+            for index, event in enumerate(image.events)
         ]
-        actual_words = [
-            regs.read32(target.SEQ_EVENT_MEMORY + index * target.WORD.size)
-            for index in range(len(expected_words))
-        ]
-        self.assertEqual(actual_words, expected_words)
-        self.assertEqual(regs.read32(target.SEQ_EVENT_COUNT), len(self.events))
+        self.assertEqual(transport.events, expected_requests)
+        self.assertEqual(transport.event_count, len(self.events))
+        self.assertEqual(transport.expected_crc, image.crc32)
+        self.assertNotIn("DevMem32", vars(target))
 
     def test_upload_rejects_locked_memory(self) -> None:
         image = target.decode_image(self.encoded)
-        regs = FakeRegisters()
-        regs.values[target.SEQ_STATUS] = (
+        transport = FakeTransport()
+        transport.raw_status = (
             target.STATUS_ARMED | target.STATUS_MEMORY_LOCKED
         )
         with self.assertRaisesRegex(RuntimeError, "not writable"):
-            target.load_image(regs, image)
+            target.load_image(transport, image)
 
 
-class MmioAccessTests(unittest.TestCase):
-    def test_devmem_uses_typed_words_instead_of_mmap_slices(self) -> None:
-        mapping = mmap.mmap(-1, target.APB_SIZE)
-        fd = os.open(os.devnull, os.O_RDWR)
+class ProtocolTests(unittest.TestCase):
+    def test_rpmsg_message_remains_fixed_size(self) -> None:
+        self.assertEqual(target.RPMSG_ABI_VERSION, 2)
+        self.assertEqual(target.RPMSG_MESSAGE.size, 64)
 
-        with mock.patch.object(target.os, "open", return_value=fd), \
-             mock.patch.object(target.mmap, "mmap", return_value=mapping):
-            with target.DevMem32(0, target.APB_SIZE) as regs:
-                regs.write32(0, 0xA5A5_5A5A)
-                self.assertEqual(regs.read32(0), 0xA5A5_5A5A)
-                self.assertEqual(mapping[:4], target.WORD.pack(0xA5A5_5A5A))
+    def test_r5_validation_error_names_event_and_fault(self) -> None:
+        error = target.R5ServiceError(-9, (3, 6))
+        self.assertIn("event 3", str(error))
+        self.assertIn("safe state", str(error))
 
-        implementation = inspect.getsource(target.DevMem32)
-        self.assertNotIn("self._mem[", implementation)
+    def test_r5_hardware_fault_decodes_status_snapshot(self) -> None:
+        payload = (0, 4, 2, 0, (2 << 16) | 9, 0, 0, 0, 0, 0, 0)
+        error = target.R5ServiceError(-12, payload)
+        self.assertIn("illegal command", str(error))
+        self.assertIn("event 2", str(error))
 
 
 if __name__ == "__main__":

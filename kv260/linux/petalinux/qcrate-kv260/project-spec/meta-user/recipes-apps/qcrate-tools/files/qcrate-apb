@@ -60,6 +60,7 @@ SEQUENCE_START_TIME_LO = SEQUENCE_BASE + 0x020
 SEQUENCE_START_TIME_HI = SEQUENCE_BASE + 0x024
 SEQUENCE_ELAPSED_LO = SEQUENCE_BASE + 0x028
 SEQUENCE_ELAPSED_HI = SEQUENCE_BASE + 0x02C
+SEQUENCE_PAGE_END = SEQUENCE_BASE + 0x1000
 
 
 @dataclass(frozen=True)
@@ -257,6 +258,11 @@ def main() -> int:
     write_parser = subparsers.add_parser("write", help="write one 32-bit APB offset")
     write_parser.add_argument("offset", type=parse_int)
     write_parser.add_argument("value", type=parse_int)
+    write_parser.add_argument(
+        "--unsafe-sequence-owner-override",
+        action="store_true",
+        help="permit a diagnostic write to the R5-owned sequencer page",
+    )
 
     args = parser.parse_args()
 
@@ -266,6 +272,17 @@ def main() -> int:
         print(f"qcrate-apb: refusing unsafe APB access: {exc}", file=sys.stderr)
         print(
             "qcrate-apb: inspect 'systemctl status qcrate-pl-load.service'",
+            file=sys.stderr,
+        )
+        return 2
+
+    if (
+        args.command == "write"
+        and SEQUENCE_BASE <= args.offset < SEQUENCE_PAGE_END
+        and not args.unsafe_sequence_owner_override
+    ):
+        print(
+            "qcrate-apb: sequencer writes are owned by R5; use qcrate-sequence",
             file=sys.stderr,
         )
         return 2

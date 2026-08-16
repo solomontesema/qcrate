@@ -49,6 +49,8 @@ layout. Format changes require an explicit version change; never reinterpret an
 existing version silently.
 
 The development-PC compiler is `host/sequence_compiler/qcrate_sequence.py`.
-The PetaLinux image installs an independent target validator and APB loader as
-`qcrate-sequence`; its build and board commands are documented in
-`kv260/linux/petalinux/README.md`.
+The PetaLinux image installs `qcrate-sequence`, which independently validates
+the file and transfers one event per RPMsg request to R5-0. R5-0 repeats the
+safety checks, writes and reads back the PL event RAM, checks the payload CRC,
+and owns all sequencer lifecycle commands. Build and board commands are
+documented in `kv260/linux/petalinux/README.md`.

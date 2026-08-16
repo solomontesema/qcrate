@@ -3,7 +3,7 @@
 This milestone proves a complete heterogeneous-control path on the KV260:
 
 ```text
-A53 Linux qcrate-control
+A53 Linux qcrate-control / qcrate-sequence
         |
         | /dev/rpmsgN (rpmsg_char)
         v
@@ -12,15 +12,15 @@ VirtIO RPMsg shared memory and IPI
         v
 R5-0 FreeRTOS qcrate-control service
         |
-        | bounded APB operations
+        | bounded APB operations and sequencer ownership
         v
-Q-Crate SYS registers at 0xA0010000
+Q-Crate SYS and SEQUENCE registers
 ```
 
 It is deliberately a small vertical slice. It proves Linux `remoteproc`,
 FreeRTOS, OpenAMP, VirtIO/RPMsg, shared-memory carveouts, IPI notification, a
-versioned application protocol, and R5 access to the fixed PL. It does not yet
-move stream ownership or implement the deterministic pulse sequencer.
+versioned application protocol, R5 access to the fixed PL, and deterministic
+sequencer ownership. Stream and DMA ownership remain on Linux.
 
 ## Architecture decisions
 
@@ -34,13 +34,15 @@ The alternatives considered were:
 | Linux userspace interface | Custom kernel protocol driver; `rpmsg_char` | `rpmsg_char` for this bounded control service. A custom driver is justified later only if the protocol needs kernel ownership, concurrency, or a stable subsystem API. |
 | R5 firmware launch | Put the ELF in `BOOT.BIN`; Linux runtime load | Linux `remoteproc` loads the ELF. This gives Linux explicit lifecycle ownership and is the normal OpenAMP development path. |
 | Register access | Arbitrary remote MMIO commands; explicit operations | Explicit `PING`, `GET_INFO`, and `SCRATCH_TEST` commands. The R5 service is not an unrestricted APB proxy. |
+| Sequence upload | Shared DDR buffer; multiple events per RPMsg packet; one event per packet | One event per fixed-size request. At the 128-event hardware limit this is bounded, simple to validate and retry, and keeps shared-memory ownership out of the control path. |
 
 Register ownership is intentionally narrow:
 
 - SYS identity registers are readable by Linux and R5.
 - SYS scratch is diagnostic and is restored after the R5 test.
 - STREAM registers and AXI DMA remain owned by the Linux `qcrate-dma` path.
-- Future sequencer/timing registers will be R5-owned.
+- The entire SEQUENCE register page and event RAM are R5-owned. Linux uses the
+  typed RPMsg commands and must not write that APB page directly.
 - DMA descriptors and buffers remain Linux-owned.
 
 ## Source and generated files
@@ -48,8 +50,10 @@ Register ownership is intentionally narrow:
 Tracked source of truth:
 
 - `common/protocol/qcrate_protocol.h`: fixed 64-byte wire ABI.
+- `common/sequence/qcrate_sequence_format.h`: shared event and fault contract.
 - `kv260/r5_freertos/`: Q-Crate FreeRTOS endpoint implementation.
 - `kv260/linux/openamp/qcrate_control.c`: Linux `rpmsg_char` client.
+- `qcrate-sequence`: Linux sequence validator and RPMsg client.
 - `kv260/vitis/`: reproducible Vitis 2024.2 scripts.
 - `qcrate-openamp` Yocto recipe: firmware installation and systemd lifecycle.
 - `system-user.dtsi`: Linux R5 remoteproc, IPI, TCM, and reserved-memory nodes.
@@ -165,9 +169,38 @@ Every request and response is exactly 64 bytes and contains:
 | `GET_INFO` | empty | device ID, version, build ID, capabilities, stream clock, control clock |
 | `SCRATCH_TEST` | one test value | original, requested, readback, restore target, restored readback |
 | `GET_R5_STATS` | empty | tick count, tick rate, accepted requests, rejected requests |
+| `SEQ_LOAD_BEGIN` | event count, payload CRC | accepted count and CRC |
+| `SEQ_LOAD_EVENT` | index plus one four-word event | accepted index |
+| `SEQ_LOAD_COMMIT` | empty | committed event count and CRC |
+| `SEQ_GET_STATUS` | empty | PL status, counters, and 64-bit timing values |
+| `SEQ_ARM` | external-trigger flag | current sequence status |
+| `SEQ_START` | empty | current sequence status |
+| `SEQ_ABORT` | empty | current sequence status |
+| `SEQ_RESET` | empty | current sequence status |
 
 Both processors are little-endian. Any future cross-endian target must add
 explicit wire conversion without changing the existing ABI silently.
+
+### Sequencer ownership transaction
+
+The sequence protocol is deliberately transactional and fail-closed:
+
+1. Linux validates the complete `.qseq` file before contacting R5.
+2. `SEQ_LOAD_BEGIN` records the expected event count and payload CRC only when
+   the PL is idle, unlocked, and fault-free. It invalidates any older commit.
+3. Ordered `SEQ_LOAD_EVENT` requests repeat the format and safety checks in R5,
+   write four APB words, read them back, and extend an incremental CRC.
+4. `SEQ_LOAD_COMMIT` succeeds only after all events arrive and the CRC matches;
+   R5 then writes and reads back the PL event count.
+5. ARM and START are rejected until a sequence is committed. ABORT and RESET
+   use bounded state waits, so a failed PL transition cannot block R5 forever.
+
+R5 returns the eleven-word hardware status snapshot for status and lifecycle
+commands. Status bit 30 means an upload is active and bit 31 means R5 has a
+committed sequence. These two bits describe R5 ownership state and are not PL
+register bits. Upload errors invalidate the transaction; Linux must start again
+with `SEQ_LOAD_BEGIN`. The fixed message remains 64 bytes, but the wire ABI is
+version 2 because the command and status contract changed.
 
 ### Worked extension: R5 service statistics
 
@@ -192,9 +225,10 @@ reloads the R5 firmware. The FreeRTOS tick count also wraps according to
 `TickType_t`; this diagnostic reports current firmware uptime, not wall-clock
 time.
 
-This extension requires no XSA, device-tree, kernel, carveout, endpoint-name,
-or Yocto recipe change. Those layers establish transport and lifecycle. A new
-command changes only the shared application protocol and its two endpoints.
+The statistics extension required no XSA, device-tree, kernel, carveout,
+endpoint-name, or Yocto recipe change. The sequencer ownership extension has
+the same boundary: it changes the shared protocol, the R5 endpoint, and Linux
+userspace, while reusing the established transport and lifecycle layers.
 
 ## Reserved-memory contract
 
@@ -306,6 +340,7 @@ sudo qcrate-control info
 sudo qcrate-control scratch-test 0xa5a55a5a
 sudo qcrate-control stats
 sudo qcrate-control test
+sudo qcrate-sequence status
 ```
 
 Expected acceptance evidence includes:
@@ -330,10 +365,30 @@ Also confirm the existing Linux-owned DMA path still works after R5 starts:
 sudo qcrate-dma capture
 ```
 
+Compile and copy a sequence from the development PC, then exercise the
+R5-owned control path:
+
+```bash
+python3 host/sequence_compiler/qcrate_sequence.py compile \
+  host/sequence_compiler/examples/two_channel_demo.json \
+  /tmp/two_channel_demo.qseq
+scp /tmp/two_channel_demo.qseq \
+  petalinux@<kv260-ip>:~/qcrate/two_channel_demo.qseq
+
+sudo qcrate-sequence test ~/qcrate/two_channel_demo.qseq
+sudo qcrate-sequence status
+```
+
+Expected evidence includes `PASS R5 loaded and committed 4 events`,
+`PASS R5 armed 4 events`, `PASS R5 shot 1`, and a final idle status with one
+completed shot. `qcrate-apb` still permits sequence-page reads for diagnosis,
+but refuses writes unless the explicit unsafe owner-override option is given.
+
 The board acceptance completed successfully with the fixed 200/100 MHz PL
-clocks, the R5-0 remote processor running, the `qcrate-control` RPMsg channel
-responsive, all control commands passing, and the existing DMA capture still
-passing.
+clocks, the R5-0 remote processor running, and the `qcrate-control` RPMsg
+channel responsive. The R5-owned sequencer upload, CRC/readback, ARM, START,
+completion, and status path passed, and the existing Linux-owned DMA capture
+continued to pass.
 
 ## Failure diagnostics
 
