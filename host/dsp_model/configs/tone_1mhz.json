@@ -1,0 +1,14 @@
+{
+  "format": "qcrate-dsp-v1",
+  "sample_rate_hz": 200000000,
+  "decimation": 16,
+  "frame_length": 1024,
+  "frame_count": 4,
+  "signal_frequency_hz": 30000000,
+  "lo_frequency_hz": 29000000,
+  "signal_amplitude": 0.75,
+  "signal_phase_turns": 0.0,
+  "lo_phase_turns": 0.0,
+  "noise_amplitude": 0.01,
+  "noise_seed": 44257
+}

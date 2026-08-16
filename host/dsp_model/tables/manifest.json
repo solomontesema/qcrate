@@ -1,0 +1,19 @@
+{
+  "decimation": 16,
+  "fir_cutoff_hz": 4125000,
+  "fir_estimated_taps": 205,
+  "fir_integer_sum": 131072,
+  "fir_sha256": "0a0bf810b70a5f682a51046ec3d6d4529a5e6f7d6a883fb78e952f5b5fa2508e",
+  "fir_taps": 217,
+  "format": "qcrate-dsp-tables-v1",
+  "kaiser_beta": 6.75526,
+  "lut_address_bits": 12,
+  "max_passband_ripple_db": 0.1,
+  "min_stopband_attenuation_db": 70.0,
+  "passband_hz": 2000000,
+  "phase_bits": 32,
+  "quarter_lut_values": 1025,
+  "sample_rate_hz": 200000000,
+  "sine_sha256": "25b27e310ba59401e3f48ee68d7dc0c1a37ca9d70d3a59f3863d0e95c8799fee",
+  "stopband_hz": 6250000
+}

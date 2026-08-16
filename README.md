@@ -21,6 +21,7 @@ Tcl, configuration, recipes, and scripts.
 | Heterogeneous control | Linux `remoteproc` plus VirtIO RPMsg to R5-0 FreeRTOS/OpenAMP |
 | Timing | Shared 64-bit 200 MHz timebase and deterministic two-channel event sequencer |
 | Sequence tooling | Standard-library Python compiler with a versioned, CRC-protected binary format |
+| DSP model | Floating-point and bit-accurate 200 MHz DDC/FIR-decimator contract |
 | Networking | Reproducible Ethernet topology and throughput-baseline tooling |
 
 The pulse sequencer has passed RTL, PetaLinux, direct A53 bring-up, and final
@@ -61,6 +62,7 @@ common/
   sequence/              shared deterministic sequence format
 config/                   reproducible FPGA build configuration
 host/sequence_compiler/   JSON-to-QSEQ compiler and host tests
+host/dsp_model/           DSP numerical contract, generated tables, and tests
 kv260/hw/
   bd/                     exported block-design Tcl
   rtl/                    handwritten SystemVerilog
@@ -84,6 +86,7 @@ are kept beside the subsystem they describe:
 - [R5 FreeRTOS and OpenAMP](kv260/linux/openamp/README.md)
 - [sequence binary format](common/sequence/README.md)
 - [sequence compiler](host/sequence_compiler/README.md)
+- [DSP-0 numerical contract and bit-accurate model](host/dsp_model/README.md)
 - [network baseline](kv260/linux/network/README.md)
 - [historical Kria Ubuntu and `xmutil` bring-up](kv260/linux/README.md)
 
@@ -130,10 +133,12 @@ completed runs. `all` intentionally recreates the complete hardware build.
 
 ## Host tests
 
-The sequence compiler and target protocol tests do not require AMD tools:
+The host numerical, sequence compiler, and target protocol tests do not require
+AMD tools:
 
 ```bash
 python3 -m unittest discover -s host/sequence_compiler/tests -v
+python3 -m unittest discover -s host/dsp_model/tests -v
 python3 -m unittest kv260/linux/tests/test_qcrate_sequence_tool.py -v
 ```
 
@@ -181,6 +186,6 @@ publish matching source revisions and checksums.
 
 Q-Crate is an active engineering and learning project. The KV260 fixed
 platform, APB control plane, framed DMA acquisition, FreeRTOS/OpenAMP vertical
-slice, and deterministic sequencer are implemented. DSP processing, UDP data
-transport, and expansion to additional instrumentation nodes remain future
-milestones.
+slice, deterministic sequencer, and DSP-0 bit-accurate numerical contract are
+implemented. DSP RTL, UDP data transport, and expansion to additional
+instrumentation nodes remain future milestones.
