@@ -216,8 +216,8 @@ Do not build the recipes against the old XSA. The firmware recipe now rejects
 simple-mode SDT deliberately. Rebuild Vivado and run the PetaLinux `configure`
 stage first, then use the focused recipe builds below. Success means BitBake
 finishes each named recipe without an `ERROR:` line. For a module compile
-failure, return the first compiler `error:` and several lines around it; the
-final BitBake task summary is usually secondary.
+failure, begin diagnosis with the first compiler `error:` and several lines
+around it; the final BitBake task summary is usually secondary.
 
 An immediate `make: *** No targets. Stop.` means the external-module Makefile
 did not provide the `all` target that delegates to kernel Kbuild. Merely setting

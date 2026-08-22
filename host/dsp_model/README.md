@@ -182,9 +182,10 @@ python3 -m venv .venv
 python3 -m pip install -r host/dsp_model/requirements.txt
 ```
 
-Do not regenerate tables as part of an FPGA build. They are reviewed source
-artifacts so RTL, host tests, and future firmware consume identical values.
-Regenerate them only after an intentional numerical-contract change:
+The canonical tables live in `rtl/dsp/tables` because Python and synthesizable
+RTL consume the same numerical artifacts. Do not regenerate them as part of an
+FPGA build. They are reviewed source artifacts and change only after an
+intentional numerical-contract revision:
 
 ```bash
 python3 host/dsp_model/generate_coeffs.py
@@ -217,6 +218,15 @@ Run all focused contract tests:
 
 ```bash
 python3 -m unittest discover -s host/dsp_model/tests -v
+```
+
+Generate the intermediate ADC, LO, and mixer vectors used by DSP-1 RTL:
+
+```bash
+python3 host/dsp_model/qcrate_dsp.py generate-rtl-vectors \
+  host/dsp_model/configs/tone_1mhz.json \
+  build/dsp/rtl_vectors \
+  --samples 1024
 ```
 
 These are host-only commands. DSP-0 does not require Vivado, Vitis, a

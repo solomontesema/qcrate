@@ -13,6 +13,7 @@ from typing import NoReturn
 
 STAGES = ("project", "synth", "impl", "bitstream", "xsa", "export", "all")
 RTL_SUFFIXES = {".v", ".sv", ".vh", ".svh"}
+DATA_SUFFIXES = {".coe", ".hex", ".mem"}
 
 
 def die(message: str) -> NoReturn:
@@ -107,6 +108,7 @@ def main() -> int:
         die(f"missing exported BD Tcl: {bd_tcl}")
 
     rtl = discover(root, cfg["rtl_dirs"], RTL_SUFFIXES)
+    data = discover(root, cfg.get("data_dirs", []), DATA_SUFFIXES)
     xdc = discover(root, cfg["xdc_dirs"], {".xdc"})
     if not rtl:
         die("no RTL files discovered")
@@ -128,6 +130,7 @@ def main() -> int:
         f"set cfg_jobs {int(cfg['jobs'])}",
         *tcl_list_assignment("cfg_verilog_defines", args.define),
         *tcl_list_assignment("cfg_rtl_files", rtl),
+        *tcl_list_assignment("cfg_data_files", data),
         *tcl_list_assignment("cfg_xdc_files", xdc),
     ]
     manifest.write_text("\n".join(lines) + "\n")
@@ -140,6 +143,7 @@ def main() -> int:
 
     print(f"BD Tcl    : {bd_tcl}")
     print(f"RTL files : {len(rtl)}")
+    print(f"Data files: {len(data)}")
     print(f"XDC files : {len(xdc)}")
     if args.define:
         print("defines   :", " ".join(args.define))

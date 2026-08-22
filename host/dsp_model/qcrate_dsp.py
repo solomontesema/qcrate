@@ -41,7 +41,8 @@ FIR_TAPS = 217
 KAISER_BETA = 6.75526
 
 FORMAT_NAME = "qcrate-dsp-v1"
-TABLE_DIR = Path(__file__).resolve().parent / "tables"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TABLE_DIR = REPO_ROOT / "rtl" / "dsp" / "tables"
 SINE_TABLE = TABLE_DIR / "sine_quarter_q1_15.hex"
 FIR_TABLE = TABLE_DIR / "fir_decim16_q1_17.hex"
 
@@ -324,6 +325,92 @@ def lfsr16_noise(count: int, seed: int) -> np.ndarray:
 
 
 @dataclass(frozen=True)
+class FixedFrontendTrace:
+    """Bit-accurate samples at the future ADC-to-FIR RTL boundary."""
+
+    adc: np.ndarray
+    lo_sin: np.ndarray
+    lo_cos: np.ndarray
+    mixed_i: np.ndarray
+    mixed_q: np.ndarray
+    signal_phase_word: int
+    signal_phase_initial: int
+    lo_phase_word: int
+    lo_phase_initial: int
+
+
+def _run_fixed_frontend(config: DspConfig, sine_lut: np.ndarray,
+                        noise_q15: np.ndarray) -> FixedFrontendTrace:
+    sample_count = len(noise_q15)
+    signal_word = frequency_to_phase_word(config.signal_frequency_hz)
+    lo_word = frequency_to_phase_word(config.lo_frequency_hz)
+    signal_initial = turns_to_phase_word(config.signal_phase_turns)
+    lo_initial = turns_to_phase_word(config.lo_phase_turns)
+    signal_phase = signal_initial
+    lo_phase = lo_initial
+    amplitude = decimal_to_fixed(config.signal_amplitude, ADC_BITS, ADC_FRAC_BITS)
+    noise_amplitude = decimal_to_fixed(
+        config.noise_amplitude, ADC_BITS, ADC_FRAC_BITS
+    )
+
+    adc_samples = np.empty(sample_count, dtype=np.int16)
+    lo_sine = np.empty(sample_count, dtype=np.int16)
+    lo_cosine = np.empty(sample_count, dtype=np.int16)
+    mixed_i = np.empty(sample_count, dtype=np.int32)
+    mixed_q = np.empty(sample_count, dtype=np.int32)
+    for index in range(sample_count):
+        source_cos = nco_lookup(signal_phase + QUARTER_PHASE, sine_lut)
+        lo_cos = nco_lookup(lo_phase + QUARTER_PHASE, sine_lut)
+        lo_sin = nco_lookup(lo_phase, sine_lut)
+        source = saturate(round_shift(source_cos * amplitude, ADC_FRAC_BITS), ADC_BITS)
+        noise = saturate(
+            round_shift(int(noise_q15[index]) * noise_amplitude, ADC_FRAC_BITS),
+            ADC_BITS,
+        )
+        adc = saturate(source + noise, ADC_BITS)
+        adc_samples[index] = adc
+        lo_sine[index] = lo_sin
+        lo_cosine[index] = lo_cos
+        mixed_i[index] = saturate(
+            round_shift(adc * lo_cos, 2 * ADC_FRAC_BITS - MIXER_FRAC_BITS),
+            MIXER_BITS,
+        )
+        mixed_q[index] = saturate(
+            round_shift(-adc * lo_sin, 2 * ADC_FRAC_BITS - MIXER_FRAC_BITS),
+            MIXER_BITS,
+        )
+        signal_phase = (signal_phase + signal_word) & (PHASE_MODULUS - 1)
+        lo_phase = (lo_phase + lo_word) & (PHASE_MODULUS - 1)
+
+    return FixedFrontendTrace(
+        adc=adc_samples,
+        lo_sin=lo_sine,
+        lo_cos=lo_cosine,
+        mixed_i=mixed_i,
+        mixed_q=mixed_q,
+        signal_phase_word=signal_word,
+        signal_phase_initial=signal_initial,
+        lo_phase_word=lo_word,
+        lo_phase_initial=lo_initial,
+    )
+
+
+def run_fixed_frontend(config: DspConfig, sample_count: int,
+                       sine_lut: np.ndarray | None = None) -> FixedFrontendTrace:
+    """Generate exact ADC, LO, and mixer samples for RTL verification."""
+    if sample_count < 1:
+        raise ValueError("sample_count must be positive")
+    if sample_count > config.output_samples * config.decimation:
+        raise ValueError("sample_count exceeds the configured input capture")
+    if sine_lut is None:
+        sine_lut = load_hex(
+            SINE_TABLE, ADC_BITS, QUARTER_LUT_SIZE
+        ).astype(np.int16)
+    noise = lfsr16_noise(sample_count, config.noise_seed)
+    return _run_fixed_frontend(config, sine_lut, noise)
+
+
+@dataclass(frozen=True)
 class DspResult:
     float_i: np.ndarray
     float_q: np.ndarray
@@ -370,37 +457,9 @@ def _run_fixed(config: DspConfig, sine_lut: np.ndarray,
                fir_coefficients: np.ndarray,
                noise_q15: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     input_samples = config.output_samples * config.decimation
-    signal_word = frequency_to_phase_word(config.signal_frequency_hz)
-    lo_word = frequency_to_phase_word(config.lo_frequency_hz)
-    signal_phase = turns_to_phase_word(config.signal_phase_turns)
-    lo_phase = turns_to_phase_word(config.lo_phase_turns)
-    amplitude = decimal_to_fixed(config.signal_amplitude, ADC_BITS, ADC_FRAC_BITS)
-    noise_amplitude = decimal_to_fixed(
-        config.noise_amplitude, ADC_BITS, ADC_FRAC_BITS
-    )
-
-    mixed_i = np.empty(input_samples, dtype=np.int32)
-    mixed_q = np.empty(input_samples, dtype=np.int32)
-    for index in range(input_samples):
-        source_cos = nco_lookup(signal_phase + QUARTER_PHASE, sine_lut)
-        lo_cos = nco_lookup(lo_phase + QUARTER_PHASE, sine_lut)
-        lo_sin = nco_lookup(lo_phase, sine_lut)
-        source = saturate(round_shift(source_cos * amplitude, ADC_FRAC_BITS), ADC_BITS)
-        noise = saturate(
-            round_shift(int(noise_q15[index]) * noise_amplitude, ADC_FRAC_BITS),
-            ADC_BITS,
-        )
-        adc = saturate(source + noise, ADC_BITS)
-        mixed_i[index] = saturate(
-            round_shift(adc * lo_cos, 2 * ADC_FRAC_BITS - MIXER_FRAC_BITS),
-            MIXER_BITS,
-        )
-        mixed_q[index] = saturate(
-            round_shift(-adc * lo_sin, 2 * ADC_FRAC_BITS - MIXER_FRAC_BITS),
-            MIXER_BITS,
-        )
-        signal_phase = (signal_phase + signal_word) & (PHASE_MODULUS - 1)
-        lo_phase = (lo_phase + lo_word) & (PHASE_MODULUS - 1)
+    frontend = _run_fixed_frontend(config, sine_lut, noise_q15)
+    mixed_i = frontend.mixed_i
+    mixed_q = frontend.mixed_q
 
     output_i = np.empty(config.output_samples, dtype=np.int16)
     output_q = np.empty(config.output_samples, dtype=np.int16)
@@ -488,6 +547,41 @@ def _print_metrics(metrics: dict[str, float | int | str]) -> None:
     print(f"packed SHA-256    : {metrics['sha256']}")
 
 
+def write_rtl_vectors(config: DspConfig, output_dir: Path,
+                      sample_count: int) -> None:
+    """Write deterministic readmemh vectors for DSP-1 RTL tests."""
+    trace = run_fixed_frontend(config, sample_count)
+    vectors = {
+        "adc_q1_15.hex": render_hex(trace.adc, ADC_BITS),
+        "lo_sin_q1_15.hex": render_hex(trace.lo_sin, ADC_BITS),
+        "lo_cos_q1_15.hex": render_hex(trace.lo_cos, ADC_BITS),
+        "mixed_i_q1_17.hex": render_hex(trace.mixed_i, MIXER_BITS),
+        "mixed_q_q1_17.hex": render_hex(trace.mixed_q, MIXER_BITS),
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    hashes: dict[str, str] = {}
+    for name, contents in vectors.items():
+        (output_dir / name).write_text(contents, encoding="ascii", newline="\n")
+        hashes[name] = hashlib.sha256(contents.encode("ascii")).hexdigest()
+    metadata = {
+        "format": "qcrate-dsp-rtl-vectors-v1",
+        "sample_count": sample_count,
+        "adc_bits": ADC_BITS,
+        "mixer_bits": MIXER_BITS,
+        "signal_phase_word": trace.signal_phase_word,
+        "signal_phase_initial": trace.signal_phase_initial,
+        "lo_phase_word": trace.lo_phase_word,
+        "lo_phase_initial": trace.lo_phase_initial,
+        "vectors_sha256": hashes,
+    }
+    (output_dir / "manifest.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+        newline="\n",
+    )
+    print(f"wrote {sample_count} DSP-1 samples to {output_dir}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -496,10 +590,19 @@ def main() -> int:
     generate_parser = subparsers.add_parser("generate", help="write a compressed vector")
     generate_parser.add_argument("config", type=Path)
     generate_parser.add_argument("output", type=Path)
+    rtl_parser = subparsers.add_parser(
+        "generate-rtl-vectors", help="write DSP-1 readmemh stage vectors"
+    )
+    rtl_parser.add_argument("config", type=Path)
+    rtl_parser.add_argument("output", type=Path)
+    rtl_parser.add_argument("--samples", type=int, default=1024)
     args = parser.parse_args()
 
     try:
         config = load_config(args.config)
+        if args.command == "generate-rtl-vectors":
+            write_rtl_vectors(config, args.output, args.samples)
+            return 0
         result = run_model(config)
         metrics = result_metrics(result)
         _print_metrics(metrics)

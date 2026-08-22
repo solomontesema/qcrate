@@ -937,8 +937,8 @@ completed with no errors. Its eight deferred-runqueue warnings concerned
 shared native tools across FSBL/PMU multiconfigs; BitBake resolved them and all
 tasks succeeded.
 
-On failure, return the first causal `ERROR:` block, not the complete log. Useful
-searches are:
+On failure, diagnose the first causal `ERROR:` block rather than the complete
+log. Useful searches are:
 
 ```bash
 rg -n 'ERROR:|Failed|Nothing RPROVIDES|qcrate-' build/ | head -80

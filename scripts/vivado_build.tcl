@@ -72,7 +72,7 @@ proc configure_project {} {
     set_property verilog_define $cfg_verilog_defines [get_filesets sources_1]
 }
 proc create_project_from_manifest {} {
-    global cfg_project_name cfg_part cfg_build_dir cfg_bd_tcl cfg_rtl_files cfg_xdc_files
+    global cfg_project_name cfg_part cfg_build_dir cfg_bd_tcl cfg_rtl_files cfg_data_files cfg_xdc_files
 
     set project_dir [file join $cfg_build_dir project]
     create_project -force $cfg_project_name $project_dir -part $cfg_part
@@ -80,6 +80,9 @@ proc create_project_from_manifest {} {
 
     if {[llength $cfg_rtl_files] == 0} { fail "no RTL files in manifest" }
     add_files -norecurse $cfg_rtl_files
+    if {[llength $cfg_data_files] > 0} {
+        add_files -norecurse $cfg_data_files
+    }
     if {[llength $cfg_xdc_files] > 0} {
         add_files -fileset constrs_1 -norecurse $cfg_xdc_files
     }
@@ -100,7 +103,7 @@ proc create_project_from_manifest {} {
     update_compile_order -fileset sim_1
 }
 proc open_or_create_project {} {
-    global cfg_project_name cfg_build_dir cfg_rtl_files cfg_xdc_files stage
+    global cfg_project_name cfg_build_dir cfg_rtl_files cfg_data_files cfg_xdc_files stage
 
     set project_dir [file join $cfg_build_dir project]
     set project_xpr [file join $project_dir "${cfg_project_name}.xpr"]
@@ -112,6 +115,9 @@ proc open_or_create_project {} {
         open_project $project_xpr
         configure_project
         ensure_files_in_fileset $cfg_rtl_files sources_1
+        if {[llength $cfg_data_files] > 0} {
+            ensure_files_in_fileset $cfg_data_files sources_1
+        }
         if {[llength $cfg_xdc_files] > 0} {
             ensure_files_in_fileset $cfg_xdc_files constrs_1
         }

@@ -63,6 +63,8 @@ common/
 config/                   reproducible FPGA build configuration
 host/sequence_compiler/   JSON-to-QSEQ compiler and host tests
 host/dsp_model/           DSP numerical contract, generated tables, and tests
+rtl/dsp/                  portable NCO/DDC RTL and shared numerical tables
+rtl/tb/                   portable RTL self-checking testbenches
 kv260/hw/
   bd/                     exported block-design Tcl
   rtl/                    handwritten SystemVerilog
@@ -87,6 +89,7 @@ are kept beside the subsystem they describe:
 - [sequence binary format](common/sequence/README.md)
 - [sequence compiler](host/sequence_compiler/README.md)
 - [DSP-0 numerical contract and bit-accurate model](host/dsp_model/README.md)
+- [DSP-1 portable NCO and DDC mixer](rtl/dsp/README.md)
 - [network baseline](kv260/linux/network/README.md)
 - [historical Kria Ubuntu and `xmutil` bring-up](kv260/linux/README.md)
 
