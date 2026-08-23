@@ -119,6 +119,12 @@ module qcrate_core #(
     logic [31:0] current_sample_index_stream;
     logic [31:0] stall_cycles_stream;
 
+    logic [31:0] dsp_stream_data;
+    logic        dsp_stream_valid;
+    logic        dsp_stream_ready;
+    logic        dsp_stream_enable;
+    logic        dsp_stream_clear;
+
     // ============================================================
     // Control-domain status snapshots
     // ============================================================
@@ -518,6 +524,21 @@ module qcrate_core #(
     // Main stream-producing engine
     // ============================================================
 
+    assign dsp_stream_clear = start_pulse_stream || soft_reset_pulse_stream;
+
+    qcrate_dsp_chain #(
+        // Vivado stages tracked .mem sources into each synthesis run.
+        .SINE_LUT_FILE             ("sine_quarter_q1_15.mem")
+    ) u_dsp_chain (
+        .clk_i                      (clk_stream_i),
+        .rst_n_i                    (rst_stream_n_i),
+        .enable_i                   (dsp_stream_enable),
+        .clear_i                    (dsp_stream_clear),
+        .m_data_o                   (dsp_stream_data),
+        .m_valid_o                  (dsp_stream_valid),
+        .m_ready_i                  (dsp_stream_ready)
+    );
+
     qcrate_stream_engine #(
         .AXIS_DATA_WIDTH            (AXIS_DATA_WIDTH)
     ) u_stream_engine (
@@ -532,6 +553,11 @@ module qcrate_core #(
         .frame_count_i              (active_frame_count_stream),
         .stream_mode_i              (active_stream_mode_stream),
         .continuous_i               (active_continuous_stream),
+
+        .dsp_tdata_i                (dsp_stream_data),
+        .dsp_tvalid_i               (dsp_stream_valid),
+        .dsp_enable_o               (dsp_stream_enable),
+        .dsp_tready_o               (dsp_stream_ready),
 
         .busy_o                     (stream_busy),
         .done_pulse_o               (stream_done_pulse),

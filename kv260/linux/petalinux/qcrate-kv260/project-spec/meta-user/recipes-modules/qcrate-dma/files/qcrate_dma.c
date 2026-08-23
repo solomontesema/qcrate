@@ -165,6 +165,7 @@ static int qcrate_reset_stream(struct qcrate_dma_dev *qdma)
  */
 static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
 			      u32 frame_length_words, u32 frame_count,
+			      u32 stream_mode,
 			      u32 *timeout_ms,
 			      struct qcrate_capture_result *result)
 {
@@ -179,6 +180,8 @@ static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
 	int ret;
 
 	if (!frame_length_words || !frame_count)
+		return -EINVAL;
+	if (stream_mode > 1)
 		return -EINVAL;
 	if (frame_count > QCRATE_DMA_MAX_CHAIN_FRAMES)
 		return -E2BIG;
@@ -212,12 +215,12 @@ static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
 	qdma->result.result = DMA_TRANS_ABORTED;
 	qdma->result.residue = frame_bytes;
 
-	/* Program one finite pattern sequence and clear stale Q-Crate IRQ status. */
+	/* Program one finite stream sequence and clear stale Q-Crate IRQ status. */
 	iowrite32(0, qdma->regs + QCRATE_STREAM_CONTROL);
 	iowrite32(frame_length_words,
 		  qdma->regs + QCRATE_STREAM_FRAME_LENGTH);
 	iowrite32(frame_count, qdma->regs + QCRATE_STREAM_FRAME_COUNT);
-	iowrite32(0, qdma->regs + QCRATE_STREAM_MODE);
+	iowrite32(stream_mode, qdma->regs + QCRATE_STREAM_MODE);
 	iowrite32(0, qdma->regs + QCRATE_STREAM_IRQ_ENABLE);
 	iowrite32(0x3, qdma->regs + QCRATE_STREAM_IRQ_CLEAR);
 
@@ -317,6 +320,7 @@ static int qcrate_capture(struct qcrate_dma_dev *qdma,
 	int ret;
 
 	ret = qcrate_run_capture(qdma, capture->frame_length_words, 1,
+				 capture->stream_mode,
 				 &capture->timeout_ms, &result);
 	capture->transferred_bytes = result.transferred_bytes;
 	capture->residue_bytes = result.last_residue_bytes;
@@ -337,7 +341,8 @@ static int qcrate_capture_frames(struct qcrate_dma_dev *qdma,
 	int ret;
 
 	ret = qcrate_run_capture(qdma, capture->frame_length_words,
-				 capture->frame_count, &capture->timeout_ms,
+				 capture->frame_count, capture->stream_mode,
+				 &capture->timeout_ms,
 				 &result);
 	capture->transferred_bytes = result.transferred_bytes;
 	capture->last_residue_bytes = result.last_residue_bytes;
@@ -366,7 +371,8 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 	};
 	struct qcrate_dma_caps caps = {
 		.abi_version = QCRATE_DMA_ABI_VERSION,
-		.feature_flags = qdma->has_sg ? QCRATE_DMA_CAP_SG_CHAIN : 0,
+		.feature_flags = QCRATE_DMA_CAP_DSP_MODE |
+			(qdma->has_sg ? QCRATE_DMA_CAP_SG_CHAIN : 0),
 		.max_chain_frames = qdma->has_sg ?
 			QCRATE_DMA_MAX_CHAIN_FRAMES : 1,
 	};

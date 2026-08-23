@@ -15,13 +15,13 @@ Tcl, configuration, recipes, and scripts.
 |---|---|
 | Control plane | APB fabric with system, stream, interrupt, and sequencer register pages |
 | Clocking | 100 MHz control domain and 200 MHz stream/timing domain with explicit CDC |
-| Streaming | Backpressure-correct AXI4-Stream framed pattern source |
+| Streaming | Backpressure-correct framed counter and complex DSP sources |
 | DMA | Linux DMAEngine client with coherent buffers and finite scatter-gather frame chains |
 | Linux platform | Fixed PetaLinux platform generated from the accepted KV260 XSA |
 | Heterogeneous control | Linux `remoteproc` plus VirtIO RPMsg to R5-0 FreeRTOS/OpenAMP |
 | Timing | Shared 64-bit 200 MHz timebase and deterministic two-channel event sequencer |
 | Sequence tooling | Standard-library Python compiler with a versioned, CRC-protected binary format |
-| DSP model | Floating-point and bit-accurate 200 MHz DDC/FIR-decimator contract |
+| DSP | Bit-accurate 200 MHz synthetic ADC, DDC, FIR decimator, AXI framing, and Python model |
 | Networking | Reproducible Ethernet topology and throughput-baseline tooling |
 
 The pulse sequencer has passed RTL, PetaLinux, direct A53 bring-up, and final

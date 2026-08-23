@@ -17,6 +17,10 @@ DEVICE = Path("/dev/qcrate-dma")
 ABI_VERSION = 1
 DMA_TRANS_NOERROR = 0
 CAP_SG_CHAIN = 1 << 0
+CAP_DSP_MODE = 1 << 1
+
+DSP_CONFIG = Path("/usr/share/qcrate/dsp/tone_1mhz.json")
+DSP_TABLE_DIR = Path("/usr/share/qcrate/dsp")
 
 INFO_STRUCT = struct.Struct("<8I")
 CAPTURE_STRUCT = struct.Struct("<16I")
@@ -73,6 +77,10 @@ class DeviceCaps:
     @property
     def has_sg_chain(self) -> bool:
         return bool(self.feature_flags & CAP_SG_CHAIN)
+
+    @property
+    def has_dsp_mode(self) -> bool:
+        return bool(self.feature_flags & CAP_DSP_MODE)
 
 
 @dataclass(frozen=True)
@@ -137,18 +145,27 @@ def get_caps(fd: int) -> DeviceCaps:
     return caps
 
 
-def request_capture(fd: int, words: int, timeout_ms: int) -> CaptureResult:
-    raw = bytearray(CAPTURE_STRUCT.pack(words, timeout_ms, *([0] * 14)))
+def request_capture(
+    fd: int, words: int, timeout_ms: int, stream_mode: int = 0
+) -> CaptureResult:
+    values = [0] * 16
+    values[0] = words
+    values[1] = timeout_ms
+    values[10] = stream_mode
+    raw = bytearray(CAPTURE_STRUCT.pack(*values))
     fcntl.ioctl(fd, IOC_CAPTURE, raw, True)
     return CaptureResult(*CAPTURE_STRUCT.unpack(raw)[:10])
 
 
 def request_capture_frames(
-    fd: int, words: int, frames: int, timeout_ms: int
+    fd: int, words: int, frames: int, timeout_ms: int, stream_mode: int = 0
 ) -> CaptureFramesResult:
-    raw = bytearray(
-        CAPTURE_FRAMES_STRUCT.pack(words, frames, timeout_ms, *([0] * 13))
-    )
+    values = [0] * 16
+    values[0] = words
+    values[1] = frames
+    values[2] = timeout_ms
+    values[11] = stream_mode
+    raw = bytearray(CAPTURE_FRAMES_STRUCT.pack(*values))
     fcntl.ioctl(fd, IOC_CAPTURE_FRAMES, raw, True)
     return CaptureFramesResult(*CAPTURE_FRAMES_STRUCT.unpack(raw)[:11])
 
@@ -186,6 +203,23 @@ def verify_frames(buffer: mmap.mmap, words: int, frames: int) -> None:
                 )
 
 
+def verify_dsp(buffer: mmap.mmap, expected_words: list[int]) -> None:
+    for word_index, expected in enumerate(expected_words):
+        actual = WORD_STRUCT.unpack_from(
+            buffer, word_index * WORD_STRUCT.size
+        )[0]
+        if actual != expected:
+            actual_i = struct.unpack("<h", struct.pack("<H", actual & 0xFFFF))[0]
+            actual_q = struct.unpack("<h", struct.pack("<H", actual >> 16))[0]
+            expected_i = struct.unpack("<h", struct.pack("<H", expected & 0xFFFF))[0]
+            expected_q = struct.unpack("<h", struct.pack("<H", expected >> 16))[0]
+            raise RuntimeError(
+                f"DSP word {word_index}: expected 0x{expected:08x} "
+                f"(I={expected_i}, Q={expected_q}), got 0x{actual:08x} "
+                f"(I={actual_i}, Q={actual_q})"
+            )
+
+
 def print_info(info: DeviceInfo, caps: DeviceCaps) -> None:
     print(f"ABI version        : {info.abi_version}")
     print(f"coherent buffer    : {info.buffer_bytes} bytes")
@@ -194,6 +228,7 @@ def print_info(info: DeviceInfo, caps: DeviceCaps) -> None:
     print(f"maximum frame      : {info.max_frame_words} words")
     print(f"SG frame chaining  : {'yes' if caps.has_sg_chain else 'no'}")
     print(f"maximum SG frames  : {caps.max_chain_frames}")
+    print(f"DSP stream mode    : {'yes' if caps.has_dsp_mode else 'no'}")
     if info.max_frame_words < 4096:
         print("NOTE: the current 14-bit AXI DMA length field limits frames to 4095 words")
 
@@ -355,6 +390,95 @@ def command_capture_frames(
         os.close(fd)
 
 
+def command_capture_dsp(
+    device: Path,
+    words: int,
+    frames: int,
+    timeout_ms: int,
+    repeat: int,
+    output: Path | None,
+) -> None:
+    try:
+        from qcrate_dsp_reference import generate_words
+    except ImportError as exc:
+        raise RuntimeError("installed DSP reference module is unavailable") from exc
+
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        info = get_info(fd)
+        caps = get_caps(fd)
+        if not caps.has_dsp_mode:
+            raise RuntimeError("driver does not advertise DSP stream mode")
+        if words < 1 or words > info.max_frame_words:
+            raise ValueError(
+                f"--words must be between 1 and {info.max_frame_words}, got {words}"
+            )
+        if frames < 1:
+            raise ValueError(f"--frames must be positive, got {frames}")
+        if frames > 1 and not caps.has_sg_chain:
+            raise RuntimeError("multi-frame DSP capture requires SG chaining")
+        max_buffer_frames = info.buffer_bytes // (words * WORD_STRUCT.size)
+        max_frames = min(caps.max_chain_frames, max_buffer_frames)
+        if frames > max_frames:
+            raise ValueError(
+                f"--frames must not exceed {max_frames} for {words} words"
+            )
+        if repeat < 1:
+            raise ValueError(f"--repeat must be positive, got {repeat}")
+
+        total_words = words * frames
+        total_bytes = total_words * WORD_STRUCT.size
+        expected_words = generate_words(DSP_CONFIG, DSP_TABLE_DIR, total_words)
+        with mmap.mmap(
+            fd,
+            info.buffer_bytes,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ,
+        ) as buffer:
+            result = None
+            for iteration in range(1, repeat + 1):
+                if frames == 1:
+                    result = request_capture(fd, words, timeout_ms, stream_mode=1)
+                    residue = result.residue_bytes
+                else:
+                    result = request_capture_frames(
+                        fd, words, frames, timeout_ms, stream_mode=1
+                    )
+                    residue = result.last_residue_bytes
+                if result.dma_result != DMA_TRANS_NOERROR:
+                    raise RuntimeError(f"DMA result code {result.dma_result}")
+                if result.transferred_bytes != total_bytes:
+                    raise RuntimeError(
+                        f"transferred {result.transferred_bytes} bytes, "
+                        f"expected {total_bytes}"
+                    )
+                if residue:
+                    raise RuntimeError(f"DMA residue is {residue} bytes")
+                verify_dsp(buffer, expected_words)
+                if repeat > 1:
+                    print(
+                        f"OK  DSP capture {iteration}/{repeat}: "
+                        f"{frames} frame(s) x {words} words"
+                    )
+
+            assert result is not None
+            first = WORD_STRUCT.unpack_from(buffer, 0)[0]
+            last = WORD_STRUCT.unpack_from(buffer, (total_words - 1) * 4)[0]
+            print(
+                f"PASS {repeat} DSP capture(s), {frames} frame(s) x {words} words; "
+                "every IQ word matched the bit-exact model"
+            )
+            print(f"first/last         : 0x{first:08x} / 0x{last:08x}")
+            print(f"stream status      : 0x{result.stream_status:08x}")
+            print(f"completed frames   : {result.completed_frames}")
+            print(f"stall cycles       : {result.stall_cycles}")
+            if output is not None:
+                output.write_bytes(buffer[:total_bytes])
+                print(f"wrote               : {output}")
+    finally:
+        os.close(fd)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=Path, default=DEVICE)
@@ -399,6 +523,16 @@ def parse_args() -> argparse.Namespace:
     capture_frames.add_argument(
         "--output", type=Path, help="write the final complete chain as binary"
     )
+
+    capture_dsp = subparsers.add_parser(
+        "capture-dsp",
+        help="capture STREAM_MODE=1 and verify exact complex DSP output",
+    )
+    capture_dsp.add_argument("--words", type=int, default=1024)
+    capture_dsp.add_argument("--frames", type=int, default=4)
+    capture_dsp.add_argument("--timeout-ms", type=int, default=2000)
+    capture_dsp.add_argument("--repeat", type=int, default=1)
+    capture_dsp.add_argument("--output", type=Path)
     return parser.parse_args()
 
 
@@ -417,6 +551,15 @@ def main() -> int:
             )
         elif args.command == "capture-frames":
             command_capture_frames(
+                args.device,
+                args.words,
+                args.frames,
+                args.timeout_ms,
+                args.repeat,
+                args.output,
+            )
+        elif args.command == "capture-dsp":
+            command_capture_dsp(
                 args.device,
                 args.words,
                 args.frames,

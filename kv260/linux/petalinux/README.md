@@ -345,6 +345,26 @@ Observed result:
 PetaLinux 2024.2
 ```
 
+Run PetaLinux and Conda-based host DSP work in separate terminal sessions.
+Sourcing `settings.sh` prepends the PetaLinux SDK sysroot to `PATH` and exports
+many build variables in the current shell. An existing Conda prompt may remain
+visible even though `python3` now resolves to the SDK interpreter, which does
+not contain the host model's NumPy dependency. This is expected environment
+setup, not a modification of the Conda environment on disk.
+
+Recover a terminal for host DSP work by starting a clean login shell and then
+reactivating the environment:
+
+```bash
+exec bash -l
+conda activate cv_modern
+command -v python3
+python3 -c 'import sys, numpy; print(sys.executable, numpy.__version__)'
+```
+
+Use another terminal for PetaLinux commands and source `settings.sh` only in
+that terminal.
+
 The host is Ubuntu 22.04.5 LTS with 8 CPU cores, 31 GiB RAM, 2 GiB swap, and
 about 1.6 TiB free on the ext4 `/tools` filesystem. `/bin/sh` resolves to Bash,
 and the PetaLinux environment check reported no missing required host tools or

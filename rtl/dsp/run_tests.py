@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -31,6 +32,12 @@ TESTS = (
         "rtl/dsp/qcrate_dsp_frontend.sv",
     ),
     (
+        "qcrate_synthetic_source_tb",
+        "rtl/tb/qcrate_synthetic_source_tb.sv",
+        "rtl/dsp/qcrate_nco.sv",
+        "rtl/dsp/qcrate_synthetic_source.sv",
+    ),
+    (
         "qcrate_fir_quantizer_tb",
         "rtl/tb/qcrate_fir_quantizer_tb.sv",
         "rtl/dsp/qcrate_fir_quantizer.sv",
@@ -51,7 +58,7 @@ def main() -> int:
         raise SystemExit("error: Verilator was not found in PATH")
 
     run([
-        "python3",
+        sys.executable,
         "host/dsp_model/qcrate_dsp.py",
         "generate-rtl-vectors",
         "host/dsp_model/configs/tone_1mhz.json",

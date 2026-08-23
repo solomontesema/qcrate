@@ -9,6 +9,7 @@
 #define QCRATE_DMA_IOC_MAGIC   'Q'
 
 #define QCRATE_DMA_CAP_SG_CHAIN      (1U << 0)
+#define QCRATE_DMA_CAP_DSP_MODE      (1U << 1)
 #define QCRATE_DMA_MAX_CHAIN_FRAMES  255U
 
 struct qcrate_dma_info {
@@ -30,7 +31,8 @@ struct qcrate_dma_capture {
 	__u32 current_frame_id;
 	__u32 current_sample_index;
 	__u32 stall_cycles;
-	__u32 reserved[6];
+	__u32 stream_mode;
+	__u32 reserved[5];
 };
 
 struct qcrate_dma_caps {
@@ -52,7 +54,8 @@ struct qcrate_dma_capture_frames {
 	__u32 current_frame_id;
 	__u32 current_sample_index;
 	__u32 stall_cycles;
-	__u32 reserved[5];
+	__u32 stream_mode;
+	__u32 reserved[4];
 };
 
 #define QCRATE_DMA_IOC_GET_INFO \

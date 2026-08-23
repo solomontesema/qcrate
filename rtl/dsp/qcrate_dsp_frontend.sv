@@ -2,7 +2,7 @@
 `default_nettype none
 
 module qcrate_dsp_frontend #(
-    parameter string SINE_LUT_FILE = "rtl/dsp/tables/sine_quarter_q1_15.hex"
+    parameter string SINE_LUT_FILE = "rtl/dsp/tables/sine_quarter_q1_15.mem"
 ) (
     input  wire logic                      clk_i,
     input  wire logic                      rst_n_i,

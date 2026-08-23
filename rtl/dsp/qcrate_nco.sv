@@ -5,7 +5,7 @@ module qcrate_nco #(
     parameter int PHASE_WIDTH = 32,
     parameter int LUT_ADDR_WIDTH = 12,
     parameter int OUTPUT_WIDTH = 16,
-    parameter string LUT_FILE = "rtl/dsp/tables/sine_quarter_q1_15.hex"
+    parameter string LUT_FILE = "rtl/dsp/tables/sine_quarter_q1_15.mem"
 ) (
     input  wire logic                          clk_i,
     input  wire logic                          rst_n_i,

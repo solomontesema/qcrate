@@ -47,6 +47,7 @@ module qcrate_fir_decim16_tb;
         int input_i_file;
         int input_q_file;
         int pass_file;
+        int started_file;
         int scan_result;
         int vector_index;
         string vector_dir;
@@ -66,6 +67,12 @@ module qcrate_fir_decim16_tb;
         if (!$value$plusargs("VECTOR_DIR=%s", vector_dir)) begin
             $fatal(1, "VECTOR_DIR plusarg is required");
         end
+        started_file = $fopen({vector_dir, "/xsim.started"}, "w");
+        if (started_file == 0) begin
+            $fatal(1, "failed to create FIR XSim started sentinel");
+        end
+        $fdisplay(started_file, "DSP-2A STARTED");
+        $fclose(started_file);
         input_i_file = $fopen({vector_dir, "/fir_input_i_q1_17.hex"}, "r");
         input_q_file = $fopen({vector_dir, "/fir_input_q_q1_17.hex"}, "r");
         if ((input_i_file == 0) || (input_q_file == 0)) begin

@@ -15,6 +15,7 @@ MODEL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(MODEL_DIR))
 
 import qcrate_dsp as dsp  # noqa: E402
+import qcrate_dsp_reference as deployed_reference  # noqa: E402
 
 
 CONFIG = MODEL_DIR / "configs" / "tone_1mhz.json"
@@ -40,6 +41,13 @@ class FixedPointTests(unittest.TestCase):
             np.asarray([0x2345, -3], dtype=np.int16),
         )
         np.testing.assert_array_equal(packed, [0x2345FFFE, 0xFFFD1234])
+
+    def test_standard_library_deployment_reference(self) -> None:
+        expected = dsp.run_model(dsp.load_config(CONFIG)).packed_words[:64]
+        actual = deployed_reference.generate_words(
+            CONFIG, dsp.TABLE_DIR, len(expected)
+        )
+        np.testing.assert_array_equal(actual, expected)
 
 
 class NcoTests(unittest.TestCase):

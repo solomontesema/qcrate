@@ -12,6 +12,10 @@ module qcrate_stream_engine_tb;
     logic [31:0] frame_count;
     logic [31:0] stream_mode;
     logic        continuous;
+    logic [31:0] dsp_tdata;
+    logic        dsp_tvalid;
+    logic        dsp_enable;
+    logic        dsp_tready;
     logic        busy;
     logic        done_pulse;
     logic        error_pulse;
@@ -39,6 +43,11 @@ module qcrate_stream_engine_tb;
         .frame_count_i              (frame_count),
         .stream_mode_i              (stream_mode),
         .continuous_i               (continuous),
+
+        .dsp_tdata_i                (dsp_tdata),
+        .dsp_tvalid_i               (dsp_tvalid),
+        .dsp_enable_o               (dsp_enable),
+        .dsp_tready_o               (dsp_tready),
 
         .busy_o                     (busy),
         .done_pulse_o               (done_pulse),
@@ -102,6 +111,8 @@ module qcrate_stream_engine_tb;
         frame_count = 32'h0000_0000;
         stream_mode = 32'h0000_0000;
         continuous = 1'b0;
+        dsp_tdata = 32'h0000_0000;
+        dsp_tvalid = 1'b0;
         tready = 1'b1;
         rst_n = 1'b0;
         repeat (4) @(posedge clk);
@@ -169,6 +180,8 @@ module qcrate_stream_engine_tb;
 
         expect_bit(busy, 1'b0, "reset busy");
         expect_bit(tvalid, 1'b0, "reset TVALID");
+        expect_bit(dsp_enable, 1'b0, "reset DSP enable");
+        expect_bit(dsp_tready, 1'b0, "reset DSP ready");
         expect_word({28'd0, tkeep}, 32'h0000_000F, "reset TKEEP");
 
         frame_length = 32'd1;
@@ -176,6 +189,8 @@ module qcrate_stream_engine_tb;
         continuous = 1'b0;
         pulse_start();
         expect_bit(busy, 1'b1, "one-word start busy");
+        expect_bit(dsp_enable, 1'b0, "pattern mode isolates DSP enable");
+        expect_bit(dsp_tready, 1'b0, "pattern mode isolates DSP source");
         expect_transfer(16'd0, 16'd0, 1'b1, "one-word frame");
         expect_bit(done_pulse, 1'b1, "one-word done pulse");
         expect_bit(busy, 1'b0, "one-word done busy");

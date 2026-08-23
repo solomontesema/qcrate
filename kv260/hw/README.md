@@ -244,7 +244,10 @@ PASS: qcrate_stream_engine_tb
 
 The test covers one-word frames, multi-word finite frames, continuous mode, `TLAST`, `TKEEP`, held AXI4-Stream outputs during backpressure, graceful abort after the currently presented word is accepted, soft reset, and invalid start configuration.
 
-For this first implementation, `STREAM_MODE` is reserved. `FRAME_LENGTH=0` is invalid. In finite mode, `FRAME_COUNT=0` is also invalid. In continuous mode, `FRAME_COUNT` is ignored.
+`STREAM_MODE=0` selects this counter source and `STREAM_MODE=1` selects the
+complete complex DSP chain documented in `rtl/dsp/README.md`. Other values are
+invalid. `FRAME_LENGTH=0` is invalid. In finite mode, `FRAME_COUNT=0` is also
+invalid. In continuous mode, `FRAME_COUNT` is ignored.
 
 A lightweight Vivado parser check for the same area is:
 

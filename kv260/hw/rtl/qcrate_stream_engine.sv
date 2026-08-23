@@ -13,10 +13,13 @@ module qcrate_stream_engine #(
 
     input  wire logic [31:0]                  frame_length_i,
     input  wire logic [31:0]                  frame_count_i,
-    /* verilator lint_off UNUSEDSIGNAL */
     input  wire logic [31:0]                  stream_mode_i,
-    /* verilator lint_on UNUSEDSIGNAL */
     input  wire logic                         continuous_i,
+
+    input  wire logic [AXIS_DATA_WIDTH-1:0]  dsp_tdata_i,
+    input  wire logic                         dsp_tvalid_i,
+    output logic                              dsp_enable_o,
+    output logic                              dsp_tready_o,
 
     output logic                              busy_o,
     output logic                              done_pulse_o,
@@ -36,6 +39,7 @@ module qcrate_stream_engine #(
 
     logic [31:0] active_frame_length;
     logic [31:0] active_frame_count;
+    logic [31:0] active_stream_mode;
     logic        active_continuous;
     logic        abort_pending;
 
@@ -53,6 +57,16 @@ module qcrate_stream_engine #(
     assign next_frame_id = current_frame_id_o + 32'd1;
 
     assign m_axis_tkeep_o = {(AXIS_DATA_WIDTH/8){1'b1}};
+    assign m_axis_tdata_o = (active_stream_mode == 32'd1) ?
+                            dsp_tdata_i :
+                            pack_stream_word(current_frame_id_o[15:0],
+                                             current_sample_index_o[15:0]);
+    assign m_axis_tvalid_o = busy_o &&
+                             ((active_stream_mode == 32'd1) ?
+                              dsp_tvalid_i : 1'b1);
+    assign m_axis_tlast_o = busy_o && final_sample;
+    assign dsp_enable_o = busy_o && (active_stream_mode == 32'd1);
+    assign dsp_tready_o = dsp_enable_o && m_axis_tready_i;
 
     function automatic logic [AXIS_DATA_WIDTH-1:0] pack_stream_word(
         input logic [15:0] frame_id,
@@ -71,6 +85,7 @@ module qcrate_stream_engine #(
         begin
             active_frame_length <= 32'h0000_0000;
             active_frame_count <= 32'h0000_0000;
+            active_stream_mode <= 32'h0000_0000;
             active_continuous <= 1'b0;
             abort_pending <= 1'b0;
             busy_o <= 1'b0;
@@ -78,9 +93,6 @@ module qcrate_stream_engine #(
             current_frame_id_o <= 32'h0000_0000;
             current_sample_index_o <= 32'h0000_0000;
             stall_cycles_o <= 32'h0000_0000;
-            m_axis_tdata_o <= '0;
-            m_axis_tvalid_o <= 1'b0;
-            m_axis_tlast_o <= 1'b0;
         end
     endtask
 
@@ -108,38 +120,30 @@ module qcrate_stream_engine #(
                     if (abort_pending || abort_i) begin
                         busy_o <= 1'b0;
                         abort_pending <= 1'b0;
-                        m_axis_tvalid_o <= 1'b0;
-                        m_axis_tlast_o <= 1'b0;
                     end else if (final_sample) begin
                         completed_frames_o <= completed_frames_o + 32'd1;
 
                         if (final_frame) begin
                             busy_o <= 1'b0;
                             done_pulse_o <= 1'b1;
-                            m_axis_tvalid_o <= 1'b0;
-                            m_axis_tlast_o <= 1'b0;
                         end else begin
                             current_frame_id_o <= next_frame_id;
                             current_sample_index_o <= 32'h0000_0000;
-                            m_axis_tdata_o <= pack_stream_word(next_frame_id[15:0], 16'd0);
-                            m_axis_tlast_o <= (active_frame_length == 32'd1);
                         end
                     end else begin
                         current_sample_index_o <= next_sample_index;
-                        m_axis_tdata_o <= pack_stream_word(current_frame_id_o[15:0],
-                                                           next_sample_index[15:0]);
-                        m_axis_tlast_o <= (next_sample_index ==
-                                           (active_frame_length - 32'd1));
                     end
                 end
 
                 if (!busy_o && start_i) begin
                     if ((frame_length_i == 32'd0) ||
-                        (!continuous_i && (frame_count_i == 32'd0))) begin
+                        (!continuous_i && (frame_count_i == 32'd0)) ||
+                        (stream_mode_i > 32'd1)) begin
                         error_pulse_o <= 1'b1;
                     end else begin
                         active_frame_length <= frame_length_i;
                         active_frame_count <= frame_count_i;
+                        active_stream_mode <= stream_mode_i;
                         active_continuous <= continuous_i;
                         abort_pending <= 1'b0;
                         busy_o <= 1'b1;
@@ -147,9 +151,6 @@ module qcrate_stream_engine #(
                         current_frame_id_o <= 32'h0000_0000;
                         current_sample_index_o <= 32'h0000_0000;
                         stall_cycles_o <= 32'h0000_0000;
-                        m_axis_tdata_o <= pack_stream_word(16'd0, 16'd0);
-                        m_axis_tvalid_o <= 1'b1;
-                        m_axis_tlast_o <= (frame_length_i == 32'd1);
                     end
                 end
             end

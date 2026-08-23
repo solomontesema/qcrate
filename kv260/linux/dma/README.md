@@ -31,6 +31,7 @@ Current source scope:
 - one exclusive userspace owner;
 - timeout, stream reset, and DMA termination recovery;
 - complete verification of `{frame_id[15:0], sample_index[15:0]}`;
+- exact verification of DSP IQ words selected by `STREAM_MODE=1`;
 - backward-compatible one-frame capture and repeat testing.
 
 Cyclic rings, indefinite acquisition, concurrent userspace consumption, and
@@ -88,7 +89,7 @@ This separates responsibilities cleanly:
 | --- | --- |
 | `xilinx_dma` | AXI DMA registers, descriptor programming, IRQ, channel reset |
 | `qcrate_dma` | stream configuration, arm-before-start ordering, buffer, timeout |
-| `qcrate-dma` | capture request, `mmap`, pattern verification, optional file output |
+| `qcrate-dma` | capture request, `mmap`, counter/DSP verification, optional file output |
 
 The buffer is mapped read-only by the supplied tool. `/dev/qcrate-dma` is mode
 `0600`, and the driver permits one open file at a time to prevent concurrent
@@ -110,7 +111,11 @@ recipes-modules/qcrate-dma/
     Out-of-tree platform driver, UAPI header, and module recipe.
 
 recipes-apps/qcrate-dma-tools/
-    Python capture and verification utility.
+    Python capture utility and standard-library deployed DSP reference.
+
+host/dsp_model/qcrate_dsp_reference.py
+    NumPy-free bit-exact model packaged into the target image together with the
+    canonical DSP JSON configuration and tracked sine/FIR tables.
 
 conf/petalinuxbsp.conf
     Installs the module and userspace package in the image.
@@ -235,8 +240,17 @@ package depends on that exact generated name. `IMAGE_INSTALL` therefore uses
 `qcrate-dma`, not an unversioned `kernel-module-qcrate-dma` request that DNF
 cannot resolve and not a hardcoded kernel-versioned package name.
 
-This milestone changes the AXI DMA hardware, so first recreate the Vivado
-project from the tracked BD Tcl and export a matching bitstream and XSA:
+Before the complete platform build, run the exact DSP-2B subsystem simulation:
+
+```bash
+python3 rtl/dsp/xilinx/run_test.py --test chain
+```
+
+Success requires all 256 words and four `TLAST` boundaries to match the Python
+model. Then recreate the Vivado project from tracked sources and export a
+matching bitstream and XSA. DSP-2B does not change the block design, but it
+does change the PL datapath and DMA client UAPI, so the bitstream, module,
+userspace package, and SD-card image must be deployed together:
 
 ```bash
 cd /tools/fpga_projects/qcrate
@@ -329,6 +343,7 @@ DMA transfer limit : 8388607 bytes
 maximum frame      : 262144 words
 SG frame chaining  : yes
 maximum SG frames  : 255
+DSP stream mode    : yes
 ```
 
 First rerun the backward-compatible one-frame path. Omitting `--words` now
@@ -382,6 +397,35 @@ inter-frame SG descriptor transition. This deterministic hardware backpressure
 is protocol-legal because every word and boundary verifies. Future throughput
 work should retain this measurement as the baseline and investigate any larger
 or unstable count.
+
+Verify DSP-2B with one four-frame SG command. Each frame contains 1024
+decimated complex samples, and DSP state continues across frame boundaries:
+
+```bash
+sudo qcrate-dma capture-dsp
+```
+
+The tool requests `STREAM_MODE=1`, generates 4096 expected IQ words from the
+installed configuration and canonical tables, and compares every DMA word.
+Expected final evidence includes:
+
+```text
+PASS 1 DSP capture(s), 4 frame(s) x 1024 words; every IQ word matched the bit-exact model
+first/last         : 0x00010001 / 0x23c71f8d
+completed frames   : 4
+```
+
+Repeated starts must reproduce the same words because each finite command
+reloads both NCO phases, the LFSR seed, and FIR state:
+
+```bash
+sudo qcrate-dma capture-dsp --repeat 10
+```
+
+Use `--words`, `--frames`, and `--output` for a differently partitioned finite
+capture. Those options alter framing and capture length, not the frozen DSP
+experiment. The expected sequence always starts at sample zero for each new
+capture command.
 
 Save the final captured frame when offline inspection is useful:
 

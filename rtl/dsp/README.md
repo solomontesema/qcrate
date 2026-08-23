@@ -8,8 +8,9 @@ ZCU102, processor, DMA, and physical ADC interface.
 
 DSP-2A adds the low-pass FIR and decimation boundary using a reproducibly
 generated Xilinx FIR Compiler backend and a project-owned fixed-point
-quantizer. AXI framing, register control, and `qcrate_core` integration remain
-for DSP-2B. The accepted KV260 counter stream is unchanged during DSP-2A.
+quantizer. DSP-2B composes the complete chain with a deterministic synthetic
+ADC source, integrates it into `qcrate_core`, and assigns it to
+`STREAM_MODE=1`. The accepted counter source remains available as mode 0.
 
 ## Why the design needs a 217-tap decimator by 16
 
@@ -137,12 +138,16 @@ signed Q1.15 sample, valid/ready
 | `qcrate_ddc_mixer.sv` | Signed products, ties-away rounding, and 18-bit Q1.17 saturation |
 | `qcrate_dsp_frontend.sv` | ADC/LO pipeline alignment and ready/valid backpressure |
 | `qcrate_fir_quantizer.sv` | Full-precision FIR accumulator narrowing to signed Q1.15 |
+| `qcrate_synthetic_source.sv` | Bit-exact 30 MHz test tone, amplitude scaling, and repeatable LFSR noise |
+| `qcrate_dsp_chain.sv` | Complete synthetic-source, DDC, FIR, and packed-IQ ready/valid composition |
 | `xilinx/qcrate_fir_decim16.sv` | Vendor boundary, two-path packing, and elastic output register |
 | `xilinx/create_fir_compiler.tcl` | Reproducible FIR Compiler 7.2 configuration from the tracked coefficient table |
 
 The NCO uses the top 12 phase bits and the tracked 1025-entry quarter-wave
-table in `tables/sine_quarter_q1_15.hex`. Two synchronous ROM reads produce
-sine and cosine with a two-cycle latency. The mixer uses one registered
+table in `tables/sine_quarter_q1_15.mem`. Two synchronous ROM reads produce
+sine and cosine with a two-cycle latency. The `.mem` suffix is intentional:
+Vivado recognizes and stages it as a memory-initialization source, while
+`$readmemh` consumes its hexadecimal text. The mixer uses one registered
 full-precision product stage followed by one registered rounding and saturation
 stage. The complete frontend therefore has a four-cycle accepted-input to
 valid-output latency and sustains one sample per clock.
@@ -212,6 +217,65 @@ to signed 16-bit Q1.15, and registers the result behind a one-entry elastic
 stage. This preserves Q-Crate semantics independently of vendor rounding-mode
 names.
 
+## DSP-2B stream integration
+
+The KV260 has no physical ADC attached, so DSP-2B uses a deterministic source
+that implements the same ADC stimulus as the DSP-0 model:
+
+```text
+30 MHz signal NCO + seeded Q1.15 LFSR noise
+                       |
+                       v
+              Q1.15 synthetic ADC
+                       |
+                 29 MHz LO DDC
+                       |
+                217-tap FIR /16
+                       |
+                       v
+        TDATA[31:16] = signed Q1.15 Q
+        TDATA[15:0]  = signed Q1.15 I
+```
+
+The frozen experiment uses signal increment `0x26666666`, LO increment
+`0x251eb852`, signal amplitude `24576` (0.75 in Q1.15), noise amplitude `328`,
+and LFSR seed `0xace1`. These values are parameters at the RTL boundary but are
+not yet runtime APB registers. A later control milestone can add atomic DDC
+configuration without changing the mode/framing interface.
+
+The synthetic source arithmetic is a three-stage pipeline at 200 MHz:
+
+1. register the signal and noise amplitude products;
+2. round and saturate each product from Q2.30 to Q1.15;
+3. add the components and saturate the final ADC sample.
+
+It accepts and produces one sample per clock after startup. A shared pipeline
+clock enable freezes all three stages, their valid bits, the source NCO, and
+the LFSR when downstream backpressure reaches the source. The extra internal
+latency therefore improves timing margin without changing sample values,
+ordering, or the ready/valid contract.
+
+`qcrate_stream_engine` owns frame counters, `TLAST`, completion status, abort,
+and stall accounting for both sources. It latches the source selection on
+`START`:
+
+| `STREAM_MODE` | Payload source | Word format |
+|---:|---|---|
+| `0` | DMA bring-up counter | `{frame_id[15:0], sample_index[15:0]}` |
+| `1` | Complete DSP chain | `{Q[15:0], I[15:0]}` |
+
+`FRAME_LENGTH` counts decimated IQ words. DSP phase, FIR history, and
+decimation phase continue across `TLAST`; frame boundaries only partition the
+output stream. A new `START` clears the source, NCO, and FIR state so repeated
+finite captures are deterministic.
+
+Backpressure propagates from AXI DMA through the framer, FIR Compiler,
+frontend, and synthetic source. While `TVALID=1` and `TREADY=0`, the visible
+word and `TLAST` remain stable and no NCO, LFSR, mixer, FIR, or frame state is
+advanced. This stallable source is appropriate for deterministic bring-up. A
+free-running physical ADC will instead require an elastic FIFO and explicit
+overflow accounting at the same source-provider boundary.
+
 ## Verification
 
 The host model generates intermediate ADC, LO, and mixer vectors into the
@@ -228,6 +292,7 @@ Expected final lines include:
 PASS: qcrate_nco_tb verified 1024 samples
 PASS: qcrate_ddc_mixer_tb
 PASS: qcrate_dsp_frontend_tb verified 1024 samples
+PASS: qcrate_synthetic_source_tb verified 1024 samples
 PASS: qcrate_fir_quantizer_tb
 PASS: all portable DSP RTL tests
 ```
@@ -249,35 +314,48 @@ python3 host/dsp_model/qcrate_dsp.py generate-rtl-vectors \
   --samples 1024
 ```
 
-The generated-IP test creates 4096 exact mixed I/Q inputs and 256 FIR outputs,
-recreates FIR Compiler from Tcl, and runs a focused XSim simulation:
+The generated-IP tests create 4096 input samples and 256 exact FIR outputs,
+recreate FIR Compiler from Tcl, and run both the DSP-2A unit test and DSP-2B
+complete-chain test:
 
 ```bash
 python3 rtl/dsp/xilinx/run_test.py
 ```
 
-Its self-checking testbench compares every full-precision accumulator and every
-narrowed output against Python while inserting source gaps and randomized
+The self-checking testbenches compare every full-precision FIR accumulator and
+every complete-chain output against Python while applying randomized
 backpressure. Success ends with:
 
 ```text
 PASS: qcrate_fir_decim16_tb verified 256 exact outputs
 PASS: DSP-2A generated-IP XSim flow
+PASS: qcrate_dsp_stream_tb verified 256 exact words in 4 frames
+PASS: DSP-2B complete-chain XSim flow
 ```
+
+Run only the DSP-2B integration test with:
+
+```bash
+python3 rtl/dsp/xilinx/run_test.py --test chain
+```
+
+It checks the synthetic source, both NCOs, mixer, FIR, packed IQ layout, four
+`TLAST` boundaries, completion status, and stable output under randomized AXI
+backpressure.
 
 The same test can retain its completed waveform in the Vivado GUI:
 
 ```bash
-python3 rtl/dsp/xilinx/run_test.py --open-waveform
+python3 rtl/dsp/xilinx/run_test.py --test chain --open-waveform
 ```
 
 The GUI remains open until it is closed manually. Input vectors are streamed
 from files rather than added as waveform arrays; relevant handshake, I/Q, and
 FIR signals remain available for waveform inspection.
 
-No board build is required for DSP-2A unit acceptance. DSP-2B will connect the
-complete chain to AXI framing, select it with `STREAM_MODE=1`, and compare DMA
-captures against the same model.
+The FIR unit test remains independently selectable with `--test fir`. Neither
+XSim test requires a board build. Final DSP-2B acceptance additionally rebuilds
+the fixed platform and verifies a mode-1 DMA capture on KV260.
 
 ## KV260 synthesis checks
 

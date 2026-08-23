@@ -43,7 +43,7 @@ KAISER_BETA = 6.75526
 FORMAT_NAME = "qcrate-dsp-v1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TABLE_DIR = REPO_ROOT / "rtl" / "dsp" / "tables"
-SINE_TABLE = TABLE_DIR / "sine_quarter_q1_15.hex"
+SINE_TABLE = TABLE_DIR / "sine_quarter_q1_15.mem"
 FIR_TABLE = TABLE_DIR / "fir_decim16_q1_17.hex"
 
 
@@ -633,6 +633,9 @@ def write_fir_vectors(config: DspConfig, output_dir: Path,
         "fir_accumulator_q.hex": render_hex(fir.accumulator_q, 36),
         "fir_output_i_q1_15.hex": render_hex(fir.output_i, OUTPUT_BITS),
         "fir_output_q_q1_15.hex": render_hex(fir.output_q, OUTPUT_BITS),
+        "fir_output_words.hex": render_hex(
+            pack_iq_words(fir.output_i, fir.output_q), 32
+        ),
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     hashes: dict[str, str] = {}
