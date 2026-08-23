@@ -229,6 +229,16 @@ python3 host/dsp_model/qcrate_dsp.py generate-rtl-vectors \
   --samples 1024
 ```
 
+Generate exact mixed inputs, 36-bit accumulators, and Q1.15 outputs for the
+DSP-2A FIR Compiler test:
+
+```bash
+python3 host/dsp_model/qcrate_dsp.py generate-fir-vectors \
+  host/dsp_model/configs/tone_1mhz.json \
+  build/dsp/fir_vectors \
+  --outputs 256
+```
+
 These are host-only commands. DSP-0 does not require Vivado, Vitis, a
 PetaLinux build, or the KV260 board.
 

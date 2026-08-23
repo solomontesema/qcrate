@@ -109,12 +109,16 @@ def main() -> int:
 
     rtl = discover(root, cfg["rtl_dirs"], RTL_SUFFIXES)
     data = discover(root, cfg.get("data_dirs", []), DATA_SUFFIXES)
+    ip_tcl = [resolve(root, item) for item in cfg.get("ip_tcl_files", [])]
     xdc = discover(root, cfg["xdc_dirs"], {".xdc"})
     if not rtl:
         die("no RTL files discovered")
     for define in args.define:
         if not define:
             die("--define cannot be empty")
+    missing_ip_tcl = [path for path in ip_tcl if not path.is_file()]
+    if missing_ip_tcl:
+        die(f"missing IP Tcl: {missing_ip_tcl[0]}")
 
     manifest = build_dir / "generated" / "build_manifest.tcl"
     manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -131,6 +135,7 @@ def main() -> int:
         *tcl_list_assignment("cfg_verilog_defines", args.define),
         *tcl_list_assignment("cfg_rtl_files", rtl),
         *tcl_list_assignment("cfg_data_files", data),
+        *tcl_list_assignment("cfg_ip_tcl_files", ip_tcl),
         *tcl_list_assignment("cfg_xdc_files", xdc),
     ]
     manifest.write_text("\n".join(lines) + "\n")
@@ -144,6 +149,7 @@ def main() -> int:
     print(f"BD Tcl    : {bd_tcl}")
     print(f"RTL files : {len(rtl)}")
     print(f"Data files: {len(data)}")
+    print(f"IP Tcl    : {len(ip_tcl)}")
     print(f"XDC files : {len(xdc)}")
     if args.define:
         print("defines   :", " ".join(args.define))

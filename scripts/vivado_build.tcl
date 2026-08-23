@@ -59,6 +59,13 @@ proc ensure_files_in_fileset {files fileset} {
         }
     }
 }
+proc configure_generated_ips {} {
+    global cfg_ip_tcl_files
+    foreach script $cfg_ip_tcl_files {
+        if {![file exists $script]} { fail "missing IP Tcl: $script" }
+        source $script
+    }
+}
 proc configure_project {} {
     global cfg_board_part cfg_top cfg_verilog_defines
 
@@ -77,6 +84,7 @@ proc create_project_from_manifest {} {
     set project_dir [file join $cfg_build_dir project]
     create_project -force $cfg_project_name $project_dir -part $cfg_part
     configure_project
+    configure_generated_ips
 
     if {[llength $cfg_rtl_files] == 0} { fail "no RTL files in manifest" }
     add_files -norecurse $cfg_rtl_files
@@ -114,6 +122,7 @@ proc open_or_create_project {} {
         puts "INFO: reusing existing Vivado project: $project_xpr"
         open_project $project_xpr
         configure_project
+        configure_generated_ips
         ensure_files_in_fileset $cfg_rtl_files sources_1
         if {[llength $cfg_data_files] > 0} {
             ensure_files_in_fileset $cfg_data_files sources_1

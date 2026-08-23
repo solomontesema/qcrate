@@ -6,6 +6,7 @@
   "bd_tcl": "kv260/hw/bd/design_1.tcl",
   "rtl_dirs": ["rtl/dsp", "kv260/hw/rtl"],
   "data_dirs": ["rtl/dsp/tables"],
+  "ip_tcl_files": ["rtl/dsp/xilinx/create_fir_compiler.tcl"],
   "xdc_dirs": ["kv260/hw/constraints"],
   "build_dir": "build/vivado",
   "artifact_dir": "build/artifacts",

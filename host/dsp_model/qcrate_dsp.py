@@ -339,6 +339,16 @@ class FixedFrontendTrace:
     lo_phase_initial: int
 
 
+@dataclass(frozen=True)
+class FixedFirTrace:
+    """Exact decimating-FIR accumulators and narrowed complex outputs."""
+
+    accumulator_i: np.ndarray
+    accumulator_q: np.ndarray
+    output_i: np.ndarray
+    output_q: np.ndarray
+
+
 def _run_fixed_frontend(config: DspConfig, sine_lut: np.ndarray,
                         noise_q15: np.ndarray) -> FixedFrontendTrace:
     sample_count = len(noise_q15)
@@ -410,6 +420,51 @@ def run_fixed_frontend(config: DspConfig, sample_count: int,
     return _run_fixed_frontend(config, sine_lut, noise)
 
 
+def run_fixed_fir(mixed_i: np.ndarray, mixed_q: np.ndarray,
+                  fir_coefficients: np.ndarray | None = None) -> FixedFirTrace:
+    """Filter Q1.17 I/Q samples and retain input indices 15, 31, 47, ..."""
+    if mixed_i.shape != mixed_q.shape or mixed_i.ndim != 1:
+        raise ValueError("mixed I/Q inputs must be equal-length vectors")
+    if len(mixed_i) < DECIMATION:
+        raise ValueError("FIR input must contain at least one decimation interval")
+    if fir_coefficients is None:
+        fir_coefficients = load_hex(
+            FIR_TABLE, COEFFICIENT_BITS, FIR_TAPS
+        ).astype(np.int32)
+
+    output_count = len(mixed_i) // DECIMATION
+    accumulator_i = np.empty(output_count, dtype=np.int64)
+    accumulator_q = np.empty(output_count, dtype=np.int64)
+    output_i = np.empty(output_count, dtype=np.int16)
+    output_q = np.empty(output_count, dtype=np.int16)
+    output_shift = MIXER_FRAC_BITS + COEFFICIENT_FRAC_BITS - OUTPUT_FRAC_BITS
+    accumulator_limit = 1 << (FIR_ACCUMULATOR_BITS - 1)
+
+    for output_index in range(output_count):
+        input_index = (output_index + 1) * DECIMATION - 1
+        valid_taps = min(FIR_TAPS, input_index + 1)
+        coefficients = fir_coefficients[:valid_taps].astype(np.int64)
+        samples_i = mixed_i[input_index - valid_taps + 1:input_index + 1][::-1]
+        samples_q = mixed_q[input_index - valid_taps + 1:input_index + 1][::-1]
+        sum_i = int(np.dot(samples_i.astype(np.int64), coefficients))
+        sum_q = int(np.dot(samples_q.astype(np.int64), coefficients))
+        if not (-accumulator_limit <= sum_i < accumulator_limit):
+            raise OverflowError("I FIR accumulator exceeded 48 signed bits")
+        if not (-accumulator_limit <= sum_q < accumulator_limit):
+            raise OverflowError("Q FIR accumulator exceeded 48 signed bits")
+        accumulator_i[output_index] = sum_i
+        accumulator_q[output_index] = sum_q
+        output_i[output_index] = saturate(round_shift(sum_i, output_shift), OUTPUT_BITS)
+        output_q[output_index] = saturate(round_shift(sum_q, output_shift), OUTPUT_BITS)
+
+    return FixedFirTrace(
+        accumulator_i=accumulator_i,
+        accumulator_q=accumulator_q,
+        output_i=output_i,
+        output_q=output_q,
+    )
+
+
 @dataclass(frozen=True)
 class DspResult:
     float_i: np.ndarray
@@ -461,29 +516,8 @@ def _run_fixed(config: DspConfig, sine_lut: np.ndarray,
     mixed_i = frontend.mixed_i
     mixed_q = frontend.mixed_q
 
-    output_i = np.empty(config.output_samples, dtype=np.int16)
-    output_q = np.empty(config.output_samples, dtype=np.int16)
-    output_shift = MIXER_FRAC_BITS + COEFFICIENT_FRAC_BITS - OUTPUT_FRAC_BITS
-    accumulator_limit = 1 << (FIR_ACCUMULATOR_BITS - 1)
-    for output_index in range(config.output_samples):
-        input_index = (output_index + 1) * config.decimation - 1
-        valid_taps = min(FIR_TAPS, input_index + 1)
-        coefficients = fir_coefficients[:valid_taps].astype(np.int64)
-        samples_i = mixed_i[input_index - valid_taps + 1:input_index + 1][::-1]
-        samples_q = mixed_q[input_index - valid_taps + 1:input_index + 1][::-1]
-        accumulator_i = int(np.dot(samples_i.astype(np.int64), coefficients))
-        accumulator_q = int(np.dot(samples_q.astype(np.int64), coefficients))
-        if not (-accumulator_limit <= accumulator_i < accumulator_limit):
-            raise OverflowError("I FIR accumulator exceeded 48 signed bits")
-        if not (-accumulator_limit <= accumulator_q < accumulator_limit):
-            raise OverflowError("Q FIR accumulator exceeded 48 signed bits")
-        output_i[output_index] = saturate(
-            round_shift(accumulator_i, output_shift), OUTPUT_BITS
-        )
-        output_q[output_index] = saturate(
-            round_shift(accumulator_q, output_shift), OUTPUT_BITS
-        )
-    return output_i, output_q
+    fir = run_fixed_fir(mixed_i, mixed_q, fir_coefficients)
+    return fir.output_i, fir.output_q
 
 
 def pack_iq_words(i_samples: np.ndarray, q_samples: np.ndarray) -> np.ndarray:
@@ -582,6 +616,46 @@ def write_rtl_vectors(config: DspConfig, output_dir: Path,
     print(f"wrote {sample_count} DSP-1 samples to {output_dir}")
 
 
+def write_fir_vectors(config: DspConfig, output_dir: Path,
+                      output_count: int) -> None:
+    """Write exact FIR Compiler input, accumulator, and output vectors."""
+    if not 1 <= output_count <= config.output_samples:
+        raise ValueError(
+            f"output_count must be between 1 and {config.output_samples}"
+        )
+    input_count = output_count * DECIMATION
+    frontend = run_fixed_frontend(config, input_count)
+    fir = run_fixed_fir(frontend.mixed_i, frontend.mixed_q)
+    vectors = {
+        "fir_input_i_q1_17.hex": render_hex(frontend.mixed_i, MIXER_BITS),
+        "fir_input_q_q1_17.hex": render_hex(frontend.mixed_q, MIXER_BITS),
+        "fir_accumulator_i.hex": render_hex(fir.accumulator_i, 36),
+        "fir_accumulator_q.hex": render_hex(fir.accumulator_q, 36),
+        "fir_output_i_q1_15.hex": render_hex(fir.output_i, OUTPUT_BITS),
+        "fir_output_q_q1_15.hex": render_hex(fir.output_q, OUTPUT_BITS),
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    hashes: dict[str, str] = {}
+    for name, contents in vectors.items():
+        (output_dir / name).write_text(contents, encoding="ascii", newline="\n")
+        hashes[name] = hashlib.sha256(contents.encode("ascii")).hexdigest()
+    metadata = {
+        "format": "qcrate-dsp-fir-vectors-v1",
+        "input_samples": input_count,
+        "output_samples": output_count,
+        "decimation": DECIMATION,
+        "fir_taps": FIR_TAPS,
+        "fir_accumulator_bits": 36,
+        "vectors_sha256": hashes,
+    }
+    (output_dir / "manifest.json").write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="ascii",
+        newline="\n",
+    )
+    print(f"wrote {input_count} FIR inputs and {output_count} outputs to {output_dir}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -596,12 +670,21 @@ def main() -> int:
     rtl_parser.add_argument("config", type=Path)
     rtl_parser.add_argument("output", type=Path)
     rtl_parser.add_argument("--samples", type=int, default=1024)
+    fir_parser = subparsers.add_parser(
+        "generate-fir-vectors", help="write DSP-2 FIR Compiler vectors"
+    )
+    fir_parser.add_argument("config", type=Path)
+    fir_parser.add_argument("output", type=Path)
+    fir_parser.add_argument("--outputs", type=int, default=256)
     args = parser.parse_args()
 
     try:
         config = load_config(args.config)
         if args.command == "generate-rtl-vectors":
             write_rtl_vectors(config, args.output, args.samples)
+            return 0
+        if args.command == "generate-fir-vectors":
+            write_fir_vectors(config, args.output, args.outputs)
             return 0
         result = run_model(config)
         metrics = result_metrics(result)

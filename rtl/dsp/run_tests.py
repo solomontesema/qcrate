@@ -30,6 +30,11 @@ TESTS = (
         "rtl/dsp/qcrate_ddc_mixer.sv",
         "rtl/dsp/qcrate_dsp_frontend.sv",
     ),
+    (
+        "qcrate_fir_quantizer_tb",
+        "rtl/tb/qcrate_fir_quantizer_tb.sv",
+        "rtl/dsp/qcrate_fir_quantizer.sv",
+    ),
 )
 
 
@@ -72,7 +77,7 @@ def main() -> int:
         ])
         run([str(output_dir / f"V{top}")])
 
-    print("PASS: all DSP-1 RTL tests")
+    print("PASS: all portable DSP RTL tests")
     return 0
 
 
