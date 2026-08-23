@@ -220,6 +220,102 @@ Run all focused contract tests:
 python3 -m unittest discover -s host/dsp_model/tests -v
 ```
 
+## KV260 capture viewer
+
+The self-checking DMA tool proves every captured word, but a visual report is
+useful for understanding what the DDC does and for recognizing spectral or
+I/Q defects. `qcrate_capture_viewer.py` reads the raw little-endian DMA file,
+decodes `TDATA[31:16]` as signed Q and `TDATA[15:0]` as signed I, regenerates
+the exact experiment, and creates:
+
+- the modeled 200 MS/s synthetic ADC input;
+- captured 12.5 MS/s I and Q waveforms;
+- the captured IQ constellation;
+- the captured complex spectrum in dBFS;
+- a JSON summary containing the SHA-256, exact mismatch count, and dominant
+  frequency.
+
+The input panel is explicitly labeled as modeled because mode-1 DMA receives
+only the post-decimation IQ stream. The output, constellation, spectrum, hash,
+and comparison results come from the board capture.
+
+### Accepted KV260 result
+
+![KV260 DSP-2B DMA capture](images/kv260_dsp2b_capture.png)
+
+This image was generated from an actual KV260 mode-1 DMA capture after the
+DSP-2B bitstream and PetaLinux image passed board acceptance. The capture
+contains four frames of 1024 packed IQ words, or 4096 complex samples and
+16,384 bytes. It matched the deployed standard-library reference model at
+every word:
+
+```text
+first/last         : 0x00010001 / 0x23c71f8d
+reference mismatch : 0
+capture SHA-256    : e645b9eeb7506178ac0de33d08a2d8d21b90f80289859c557be30e3b09583a4b
+```
+
+The four panels show different parts of the numerical contract:
+
+1. **Modeled ADC input:** the deterministic 30 MHz real Q1.15 source at
+   200 MS/s. This panel is regenerated from the accepted configuration because
+   the DMA interface is downstream of the DDC and does not capture raw ADC
+   samples.
+2. **Captured I/Q output:** the actual 12.5 MS/s complex DMA stream. The short
+   startup transient is the expected response of the 217-tap FIR beginning
+   with zero sample history. The settled I and Q waveforms are approximately
+   one quarter-cycle apart.
+3. **Captured constellation:** startup samples move outward from the origin,
+   then settle on a ring with magnitude near 0.375 full scale. The 25 primary
+   phase positions follow from the rational output tone ratio
+   `1 MHz / 12.5 MHz = 2/25`; deterministic source noise and fixed-point
+   quantization broaden those positions slightly.
+4. **Captured spectrum:** the DDC translates the 30 MHz input by the 29 MHz LO
+   to the expected positive 1 MHz complex tone. With 4096 output samples, FFT
+   bins are 3051.7578125 Hz apart, so the strongest sampled bin is
+   1.0009765625 MHz. That bin location is FFT resolution, not NCO frequency
+   error. The surrounding shaped floor includes deterministic source noise,
+   FIR response, finite capture length, and fixed-point effects.
+
+The visual report complements rather than replaces exact verification. A
+plausible waveform can hide one-bit arithmetic, packing, or phase errors; the
+zero mismatch count and accepted SHA-256 establish correctness, while the
+plots make the signal transformation understandable by inspection.
+
+Install the optional plotting dependency in the host Python environment:
+
+```bash
+python3 -m pip install -r host/dsp_model/requirements-viewer.txt
+```
+
+Create the raw file on KV260:
+
+```bash
+sudo qcrate-dma capture-dsp --output /tmp/qcrate-dsp.bin
+```
+
+Transfer it to the development PC without committing the binary payload:
+
+```bash
+mkdir -p build/dsp/captures
+scp petalinux@<board-ip>:/tmp/qcrate-dsp.bin \
+  build/dsp/captures/qcrate-dsp.bin
+```
+
+Generate an ignored JSON audit and a trackable board-result image:
+
+```bash
+python3 host/dsp_model/qcrate_capture_viewer.py \
+  build/dsp/captures/qcrate-dsp.bin \
+  --output host/dsp_model/images/kv260_dsp2b_capture.png \
+  --summary build/dsp/captures/qcrate-dsp.json
+```
+
+Add `--show` to open the completed figure interactively. A valid default
+capture reports zero reference mismatches and a dominant complex tone near
+`+1 MHz`. Review the PNG before committing it: the public image must represent
+an actual KV260 DMA capture, not a model-only vector.
+
 Generate the intermediate ADC, LO, and mixer vectors used by DSP-1 RTL:
 
 ```bash

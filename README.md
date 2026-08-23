@@ -27,6 +27,19 @@ Tcl, configuration, recipes, and scripts.
 The pulse sequencer has passed RTL, PetaLinux, direct A53 bring-up, and final
 R5-owned upload and lifecycle testing on the KV260.
 
+## Validated DSP capture
+
+![Q-Crate KV260 DSP-2B capture](host/dsp_model/images/kv260_dsp2b_capture.png)
+
+The KV260 DSP-2B path runs a deterministic 200 MS/s synthetic ADC through a
+29 MHz complex downconverter and a 217-tap decimate-by-16 FIR, then transfers
+the 12.5 MS/s Q1.15 IQ stream to DDR through scatter-gather DMA. The displayed
+4096-word hardware capture matched the bit-accurate Python model exactly and
+shows the expected positive 1 MHz translated tone. The modeled-input versus
+captured-output interpretation, binary format, FFT resolution, and complete
+reproduction procedure are documented in the
+[DSP model and capture viewer](host/dsp_model/README.md).
+
 ## Architecture
 
 ```text
@@ -189,6 +202,7 @@ publish matching source revisions and checksums.
 
 Q-Crate is an active engineering and learning project. The KV260 fixed
 platform, APB control plane, framed DMA acquisition, FreeRTOS/OpenAMP vertical
-slice, deterministic sequencer, and DSP-0 bit-accurate numerical contract are
-implemented. DSP RTL, UDP data transport, and expansion to additional
+slice, deterministic sequencer, bit-accurate DSP model, synthesizable DDC/FIR
+chain, and model-verified DMA capture are implemented and accepted on hardware.
+UDP data transport, a physical ADC adapter, and expansion to additional
 instrumentation nodes remain future milestones.

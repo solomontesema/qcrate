@@ -427,6 +427,19 @@ capture. Those options alter framing and capture length, not the frozen DSP
 experiment. The expected sequence always starts at sample zero for each new
 capture command.
 
+For visual host-side inspection, save the accepted default capture:
+
+```bash
+sudo qcrate-dma capture-dsp --output /tmp/qcrate-dsp.bin
+```
+
+Transfer that file to the development PC and run
+`host/dsp_model/qcrate_capture_viewer.py` as documented in
+`host/dsp_model/README.md`. The viewer regenerates the modeled synthetic ADC
+input but plots the post-decimation waveform, constellation, and spectrum from
+the actual DMA payload. It does not replace the target's exact word-by-word
+acceptance test.
+
 Save the final captured frame when offline inspection is useful:
 
 ```bash
