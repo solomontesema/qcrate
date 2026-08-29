@@ -22,6 +22,15 @@ and descriptive metadata only. Linux policy and R5 real-time control continue
 to use their existing local interfaces; a future remote control service must
 be reliable and authenticated rather than overloading this protocol.
 
+## Version Stability
+
+Data Plane v1 was frozen after finite KV260-to-host hardware acceptance on
+2026-08-29. Implementations may populate fields already defined by v1, such as
+the first-sample timestamp, but must not reinterpret or resize existing fields,
+objects, packet types, or flags. Reserved fields remain zero. Any incompatible
+wire change requires a new protocol version rather than silent evolution of
+v1.
+
 ## Design Decisions
 
 | Property | Data Plane v1 decision |

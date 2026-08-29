@@ -300,7 +300,18 @@ python3 host/data_plane/qcrate_receiver.py replay \
 
 ## Next Boundary
 
-Continuous acquisition must introduce explicit concurrent ownership between
-DMA fill buffers and network drain buffers. It must be driven by measured queue
-depth, CPU cost, socket drops, and sustained throughput rather than by
-repeatedly invoking this finite command.
+DP-4 Network Data Plane is complete, and the Data Plane v1 wire contract is
+frozen. The next milestone is DP-5 Repeated Triggered IQ Acquisition for the
+Networked Pulsed-IQ Analyzer reference application.
+
+DP-5 preserves this finite-shot path and adds a separate asynchronous finite-SG
+bank pool. Its invariant is explicit:
+
+```text
+FREE -> FILLING -> READY -> USER_OWNED -> FREE
+```
+
+No unread measurement bank may be overwritten. When no free bank exists, the
+system stops arming new acquisition work and reports starvation or skipped
+triggers. Queue depth, CPU cost, socket drops, throughput, receiver restart,
+and cable-removal recovery must be measured before DP-5 is accepted.

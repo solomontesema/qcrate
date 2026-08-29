@@ -117,6 +117,31 @@ The near-term engineering goals are:
 The project is also a structured learning vehicle for SystemVerilog, AXI,
 DMA, fixed-point DSP, embedded Linux, FreeRTOS, and heterogeneous processing.
 
+## First reference application
+
+The first integrated application is the **Networked Pulsed-IQ Analyzer**. An
+R5-supervised PL sequence produces deterministic excitation and acquisition
+events. The DSP path creates a coherent IQ response, DMA moves each triggered
+shot into explicitly owned memory, and the versioned network data plane sends
+it to a host for time-domain, magnitude, phase, and spectral analysis.
+
+The first implementation uses a deterministic RTL source and channel model.
+This is deliberate: it makes every sample and timestamp verifiable before an
+analogue front end introduces clock, noise, and converter uncertainties. A
+later ADC replaces the source while preserving the control, timing, DMA,
+network, recording, and analysis architecture.
+
+The application establishes an important data-integrity rule for future
+acquisition buffers:
+
+```text
+FREE -> FILLING -> READY -> USER_OWNED -> FREE
+```
+
+Unread measurement data is never overwritten silently. A resource shortage is
+reported as starvation or a skipped acquisition rather than hidden by stale or
+torn data.
+
 ## Non-goals of Version 0.1
 
 This edition does not claim a finished instrument, a frozen external interface,

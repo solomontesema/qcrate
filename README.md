@@ -22,10 +22,24 @@ Tcl, configuration, recipes, and scripts.
 | Timing | Shared 64-bit 200 MHz timebase and deterministic two-channel event sequencer |
 | Sequence tooling | Standard-library Python compiler with a versioned, CRC-protected binary format |
 | DSP | Bit-accurate 200 MHz synthetic ADC, DDC, FIR decimator, AXI framing, and Python model |
-| Networking | Accepted Gigabit baseline, Data Plane v1 contract, and replayable finite-shot receiver |
+| Networking | Accepted finite-shot Data Plane v1, compiled KV260 sender, and replayable host receiver |
 
 The pulse sequencer has passed RTL, PetaLinux, direct A53 bring-up, and final
 R5-owned upload and lifecycle testing on the KV260.
+
+## Reference application
+
+The first integrated Q-Crate application is the **Networked Pulsed-IQ
+Analyzer**. It is a deterministic pulse-and-acquisition instrument in which R5
+supervises the PL sequence, the shared hardware timebase identifies triggered
+IQ measurements, Linux owns DMA and network policy, and a host reconstructs and
+analyses each shot.
+
+The current signal source and channel are implemented in RTL. A future physical
+ADC can replace that source while preserving the timing, control, DMA, Data
+Plane v1, recording, and analysis contracts. This makes the demonstration
+relevant to pulsed radar, LiDAR, quantum readout, ultrasound, and laboratory
+response measurement without claiming a completed analogue front end.
 
 ## Validated DSP capture
 
@@ -214,5 +228,8 @@ chain, and model-verified DMA capture are implemented and accepted on hardware.
 The UDP wire contract, cross-language codecs, replayable host receiver, and
 compiled finite-shot KV260 sender are implemented and accepted end to end.
 The received capture passed packet-integrity, CRC, and bit-accurate DSP-model
-checks. A physical ADC adapter, continuous network acquisition, and expansion
-to additional instrumentation nodes remain future work.
+checks. This closes DP-4 Network Data Plane and freezes the v1 wire contract.
+DP-5 Repeated Triggered IQ Acquisition now integrates sequencer events,
+hardware timestamps, asynchronous DMA-bank ownership, sustained transport, and
+live host analysis. A physical ADC adapter and expansion to additional
+instrumentation nodes remain future work.
