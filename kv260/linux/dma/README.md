@@ -107,8 +107,12 @@ kv260/hw/bd/design_1.tcl
 recipes-apps/qcrate-firmware/files/qcrate-dma-client.dtsi
     Adds the client to the same PL overlay as axi_dma_0.
 
+common/dma/qcrate_dma_uapi.h
+    Canonical fixed-width ABI shared by the out-of-tree driver and compiled
+    data-plane sender.
+
 recipes-modules/qcrate-dma/
-    Out-of-tree platform driver, UAPI header, and module recipe.
+    Out-of-tree platform driver and module recipe.
 
 recipes-apps/qcrate-dma-tools/
     Python capture utility and standard-library deployed DSP reference.

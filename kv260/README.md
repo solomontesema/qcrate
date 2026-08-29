@@ -46,6 +46,7 @@ PetaLinux plus Vitis platform.
 | Fixed PetaLinux boot platform | Complete | Boot the matching bitstream, PS clocks, and static device tree | Yes |
 | Linux DMAEngine capture | Complete | Move stream frames into coherent DDR buffers and verify every word | Yes |
 | Finite SG multi-frame capture | Complete | Pre-arm framed buffers and receive increasing frame IDs from one stream start | Yes |
+| UDP Data Plane v1 | Complete | Send finite DMA shots through a versioned, loss-detecting network contract | Yes |
 | R5 FreeRTOS/OpenAMP vertical slice | Complete | Linux remoteproc/RPMsg control service with bounded R5 APB diagnostics | Yes |
 | PetaLinux plus Vitis applications | Intended deliverable | Integrate A53 Linux and later R5/OpenAMP software | Yes |
 
@@ -102,6 +103,8 @@ software architecture.
   verification, and target diagnostics.
 - `linux/network/README.md`: wired topology, addressing, throughput baseline,
   packet capture, and recorded network acceptance evidence.
+- `linux/data_plane/README.md`: compiled finite-shot DMA-to-UDP sender,
+  PetaLinux integration, host receiver, and board acceptance.
 - `linux/openamp/README.md`: R5-0 FreeRTOS, Linux remoteproc, VirtIO RPMsg,
   shared protocol, reproducible Vitis flow, and board acceptance.
 - `../common/sequence/README.md`: deterministic sequence binary contract.

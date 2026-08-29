@@ -71,6 +71,7 @@ executes pulse timing and stream generation independently of Linux scheduling.
 
 ```text
 common/
+  dma/                   shared Linux DMA userspace ABI
   data_plane/            shared C/Python UDP wire contract and codec tests
   protocol/              shared A53/R5 RPMsg wire ABI
   sequence/              shared deterministic sequence format
@@ -85,6 +86,7 @@ kv260/hw/
   rtl/                    handwritten SystemVerilog
   tb/                     self-checking SystemVerilog testbenches
 kv260/linux/
+  data_plane/             compiled finite DMA-to-UDP sender and acceptance
   dma/                    DMA architecture and acceptance notes
   network/                Ethernet baseline tooling
   openamp/                Linux/R5 OpenAMP architecture and client
@@ -108,6 +110,7 @@ are kept beside the subsystem they describe:
 - [network baseline](kv260/linux/network/README.md)
 - [Data Plane v1 wire protocol](common/data_plane/README.md)
 - [host receiver and capture bundle](host/data_plane/README.md)
+- [KV260 finite-shot UDP sender](kv260/linux/data_plane/README.md)
 - [historical Kria Ubuntu and `xmutil` bring-up](kv260/linux/README.md)
 
 ## Toolchain
@@ -208,7 +211,8 @@ Q-Crate is an active engineering and learning project. The KV260 fixed
 platform, APB control plane, framed DMA acquisition, FreeRTOS/OpenAMP vertical
 slice, deterministic sequencer, bit-accurate DSP model, synthesizable DDC/FIR
 chain, and model-verified DMA capture are implemented and accepted on hardware.
-The UDP wire contract, cross-language codecs, and replayable finite-shot host
-receiver are defined and tested; the KV260 sender is the next data-plane
-milestone. A physical ADC adapter and expansion to additional instrumentation
-nodes remain future work.
+The UDP wire contract, cross-language codecs, replayable host receiver, and
+compiled finite-shot KV260 sender are implemented and accepted end to end.
+The received capture passed packet-integrity, CRC, and bit-accurate DSP-model
+checks. A physical ADC adapter, continuous network acquisition, and expansion
+to additional instrumentation nodes remain future work.

@@ -22,11 +22,10 @@ UDP socket
           manifest.json + optional samples.bin
 ```
 
-The implementation is intentionally a finite-shot correctness reference. It
-is appropriate for the next KV260 DMA-to-UDP acceptance test. Continuous
-operation will require measured queue ownership and likely a compiled receiver
-using batched socket I/O; this Python implementation is not presented as a
-validated sustained-rate endpoint.
+The implementation is the accepted finite-shot correctness reference for the
+KV260 DMA-to-UDP path. Continuous operation will require measured queue
+ownership and likely a compiled receiver using batched socket I/O; this Python
+implementation is not presented as a validated sustained-rate endpoint.
 
 The protocol itself is specified in
 [`common/data_plane/README.md`](../../common/data_plane/README.md).
@@ -186,10 +185,13 @@ reordering, identical and conflicting duplicates, dropped and truncated
 packets, IPv4/IPv6 journal replay, and the rule that incomplete bundles do not
 contain `samples.bin`. It is host-only and does not run Vivado or PetaLinux.
 
-## Next Integration
+## KV260 Integration
 
-The next milestone adds a compiled KV260 sender that requests the existing
-finite scatter-gather DMA capture, emits `STREAM_INFO`, packetizes each frame,
-and terminates with `SHOT_END`. That sender must use the tracked C codec rather
-than duplicate the wire layout. End-to-end acceptance will compare the
-receiver's `samples.bin` against the bit-exact DSP model.
+The compiled KV260 sender now requests the existing finite scatter-gather DMA
+capture and uses the tracked C packetizer to emit `STREAM_INFO`, framed data,
+and `SHOT_END`. Its architecture, PetaLinux recipe, and board procedure are in
+[`kv260/linux/data_plane/README.md`](../../kv260/linux/data_plane/README.md).
+End-to-end acceptance compares this receiver's `samples.bin` against the
+bit-exact DSP model. The accepted 2026-08-29 capture reconstructed four frames
+and 4096 IQ words with no packet-integrity faults, socket drops, or model
+mismatches.

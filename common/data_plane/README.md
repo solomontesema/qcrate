@@ -214,7 +214,10 @@ These rules keep accidental ABI drift visible in tests and packet recordings.
 ## Source And Tests
 
 - `qcrate_data_protocol.h` and `.c`: portable C constants and explicit codecs
-  for the future KV260 sender.
+  shared by the implemented KV260 sender and host tests.
+- `qcrate_data_packetizer.h` and `.c`: reusable finite-shot framing, sequence,
+  CRC, and termination logic used by the KV260 sender.
+- `qcrate_stream_profiles.h`: canonical counter and DSP stream metadata.
 - `host/data_plane/qcrate_data_protocol.py`: Python codec for host tooling.
 - `host/data_plane/qcrate_receiver.py`: finite-shot receiver, packet journal,
   integrity analysis, and deterministic replay.
@@ -227,6 +230,7 @@ Run the focused, host-only protocol checks from the repository root:
 python3 common/data_plane/run_tests.py
 ```
 
-The test runner compiles the C codec with strict warnings and verifies that C
-and Python produce the same exact 64-byte header. It does not require Vivado,
-PetaLinux, a network connection, or a KV260.
+The test runner compiles the C codec, packetizer, and complete KV260 sender with
+strict warnings. It verifies frame splitting and that C and Python produce the
+same exact 64-byte header. It does not require Vivado, PetaLinux, a network
+connection, or a KV260.

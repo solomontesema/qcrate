@@ -67,4 +67,19 @@ struct qcrate_dma_capture_frames {
 #define QCRATE_DMA_IOC_CAPTURE_FRAMES \
 	_IOWR(QCRATE_DMA_IOC_MAGIC, 0x03, struct qcrate_dma_capture_frames)
 
+#ifdef __cplusplus
+#define QCRATE_DMA_STATIC_ASSERT static_assert
+#else
+#define QCRATE_DMA_STATIC_ASSERT _Static_assert
+#endif
+QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_info) == 32,
+			 "qcrate_dma_info ABI size changed");
+QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_capture) == 64,
+			 "qcrate_dma_capture ABI size changed");
+QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_caps) == 32,
+			 "qcrate_dma_caps ABI size changed");
+QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_capture_frames) == 64,
+			 "qcrate_dma_capture_frames ABI size changed");
+#undef QCRATE_DMA_STATIC_ASSERT
+
 #endif

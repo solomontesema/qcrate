@@ -36,6 +36,50 @@ def main() -> int:
             cwd=ROOT,
         )
         subprocess.run([str(executable)], check=True, cwd=ROOT)
+        packetizer_test = Path(temporary) / "test_qcrate_data_packetizer"
+        subprocess.run(
+            [
+                compiler,
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                f"-I{COMMON}",
+                str(COMMON / "qcrate_data_protocol.c"),
+                str(COMMON / "qcrate_data_packetizer.c"),
+                str(COMMON / "tests" / "test_qcrate_data_packetizer.c"),
+                "-o",
+                str(packetizer_test),
+            ],
+            check=True,
+            cwd=ROOT,
+        )
+        subprocess.run([str(packetizer_test)], check=True, cwd=ROOT)
+        streamer = Path(temporary) / "qcrate-streamer"
+        subprocess.run(
+            [
+                compiler,
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                f"-I{COMMON}",
+                f"-I{ROOT / 'common' / 'dma'}",
+                str(ROOT / "kv260" / "linux" / "data_plane" / "qcrate_streamer.c"),
+                str(COMMON / "qcrate_data_protocol.c"),
+                str(COMMON / "qcrate_data_packetizer.c"),
+                "-o",
+                str(streamer),
+            ],
+            check=True,
+            cwd=ROOT,
+        )
+        subprocess.run(
+            [str(streamer), "--help"],
+            check=True,
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+        )
     subprocess.run(
         [
             sys.executable,
