@@ -22,7 +22,7 @@ Tcl, configuration, recipes, and scripts.
 | Timing | Shared 64-bit 200 MHz timebase and deterministic two-channel event sequencer |
 | Sequence tooling | Standard-library Python compiler with a versioned, CRC-protected binary format |
 | DSP | Bit-accurate 200 MHz synthetic ADC, DDC, FIR decimator, AXI framing, and Python model |
-| Networking | Reproducible Ethernet topology and throughput-baseline tooling |
+| Networking | Accepted Gigabit baseline and versioned, endian-explicit Data Plane v1 contract |
 
 The pulse sequencer has passed RTL, PetaLinux, direct A53 bring-up, and final
 R5-owned upload and lifecycle testing on the KV260.
@@ -71,10 +71,12 @@ executes pulse timing and stream generation independently of Linux scheduling.
 
 ```text
 common/
+  data_plane/            shared C/Python UDP wire contract and codec tests
   protocol/              shared A53/R5 RPMsg wire ABI
   sequence/              shared deterministic sequence format
 config/                   reproducible FPGA build configuration
 host/sequence_compiler/   JSON-to-QSEQ compiler and host tests
+host/data_plane/          host-side Data Plane v1 Python codec
 host/dsp_model/           DSP numerical contract, generated tables, and tests
 rtl/dsp/                  portable NCO/DDC/FIR RTL and shared numerical tables
 rtl/tb/                   portable RTL self-checking testbenches
@@ -104,6 +106,7 @@ are kept beside the subsystem they describe:
 - [DSP-0 numerical contract and bit-accurate model](host/dsp_model/README.md)
 - [portable NCO, DDC mixer, and FIR decimator](rtl/dsp/README.md)
 - [network baseline](kv260/linux/network/README.md)
+- [Data Plane v1 wire protocol](common/data_plane/README.md)
 - [historical Kria Ubuntu and `xmutil` bring-up](kv260/linux/README.md)
 
 ## Toolchain
@@ -204,5 +207,7 @@ Q-Crate is an active engineering and learning project. The KV260 fixed
 platform, APB control plane, framed DMA acquisition, FreeRTOS/OpenAMP vertical
 slice, deterministic sequencer, bit-accurate DSP model, synthesizable DDC/FIR
 chain, and model-verified DMA capture are implemented and accepted on hardware.
-UDP data transport, a physical ADC adapter, and expansion to additional
-instrumentation nodes remain future milestones.
+The UDP wire contract and cross-language codecs are defined and tested; the
+KV260 sender and host receiver are the next data-plane milestones. A physical
+ADC adapter and expansion to additional instrumentation nodes remain future
+work.
