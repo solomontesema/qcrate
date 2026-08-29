@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680">
+  <defs>
+    <style>
+      .title { font: 700 30px 'DejaVu Sans', sans-serif; fill: #173b57; }
+      .head { font: 700 19px 'DejaVu Sans', sans-serif; fill: white; }
+      .label { font: 600 17px 'DejaVu Sans', sans-serif; fill: #173b57; }
+      .small { font: 15px 'DejaVu Sans', sans-serif; fill: #263746; }
+      .box { fill: #f5f8fa; stroke: #2d668f; stroke-width: 2.5; rx: 10; }
+      .plane { fill: #e8f1f7; stroke: #173b57; stroke-width: 3; rx: 16; }
+      .future { fill: #fff8e6; stroke: #b37a16; stroke-width: 2.5; stroke-dasharray: 10 6; rx: 10; }
+      .arrow { fill: none; stroke: #2d668f; stroke-width: 4; marker-end: url(#arrow); }
+      .control { fill: none; stroke: #6b4c9a; stroke-width: 3; marker-end: url(#purple); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#2d668f"/></marker>
+    <marker id="purple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#6b4c9a"/></marker>
+  </defs>
+  <rect width="1200" height="680" fill="white"/>
+  <text x="600" y="45" text-anchor="middle" class="title">Q-Crate architecture baseline</text>
+
+  <rect x="45" y="85" width="700" height="525" class="plane"/>
+  <rect x="45" y="85" width="700" height="55" fill="#173b57" rx="16"/>
+  <rect x="45" y="120" width="700" height="20" fill="#173b57"/>
+  <text x="395" y="121" text-anchor="middle" class="head">Programmable logic - deterministic data path</text>
+
+  <rect x="85" y="180" width="170" height="95" class="future"/>
+  <text x="170" y="218" text-anchor="middle" class="label">Signal source</text>
+  <text x="170" y="245" text-anchor="middle" class="small">ADC / pattern / NCO</text>
+  <text x="170" y="265" text-anchor="middle" class="small">planned DSP stages</text>
+
+  <rect x="310" y="180" width="175" height="95" class="box"/>
+  <text x="397" y="218" text-anchor="middle" class="label">qcrate_core</text>
+  <text x="397" y="245" text-anchor="middle" class="small">stream processing</text>
+  <text x="397" y="265" text-anchor="middle" class="small">SystemVerilog</text>
+
+  <rect x="540" y="180" width="165" height="95" class="box"/>
+  <text x="622" y="218" text-anchor="middle" class="label">AXI4-Stream</text>
+  <text x="622" y="245" text-anchor="middle" class="small">frame packing</text>
+  <text x="622" y="265" text-anchor="middle" class="small">ready / valid</text>
+
+  <path d="M255 228 H300" class="arrow"/><path d="M485 228 H530" class="arrow"/>
+
+  <rect x="155" y="375" width="190" height="95" class="box"/>
+  <text x="250" y="413" text-anchor="middle" class="label">APB registers</text>
+  <text x="250" y="440" text-anchor="middle" class="small">100 MHz control plane</text>
+  <text x="250" y="460" text-anchor="middle" class="small">configuration + status</text>
+
+  <rect x="455" y="375" width="190" height="95" class="box"/>
+  <text x="550" y="413" text-anchor="middle" class="label">Clock / reset</text>
+  <text x="550" y="440" text-anchor="middle" class="small">200 MHz data plane</text>
+  <text x="550" y="460" text-anchor="middle" class="small">CDC boundaries</text>
+
+  <path d="M345 405 C390 390 410 330 400 285" class="control"/>
+
+  <rect x="790" y="85" width="365" height="525" class="plane"/>
+  <rect x="790" y="85" width="365" height="55" fill="#173b57" rx="16"/>
+  <rect x="790" y="120" width="365" height="20" fill="#173b57"/>
+  <text x="972" y="121" text-anchor="middle" class="head">Processing system</text>
+
+  <rect x="840" y="180" width="265" height="90" class="box"/>
+  <text x="972" y="215" text-anchor="middle" class="label">AXI DMA S2MM</text>
+  <text x="972" y="242" text-anchor="middle" class="small">stream to DDR memory</text>
+
+  <rect x="840" y="320" width="265" height="90" class="box"/>
+  <text x="972" y="355" text-anchor="middle" class="label">A53 / Linux</text>
+  <text x="972" y="382" text-anchor="middle" class="small">drivers, network, Python</text>
+
+  <rect x="840" y="460" width="265" height="90" class="future"/>
+  <text x="972" y="495" text-anchor="middle" class="label">R5 / FreeRTOS</text>
+  <text x="972" y="522" text-anchor="middle" class="small">OpenAMP control - planned</text>
+
+  <path d="M705 228 H830" class="arrow"/>
+  <path d="M972 270 V310" class="arrow"/>
+  <path d="M840 365 C760 365 740 410 655 420" class="control"/>
+  <path d="M972 450 V420" class="control"/>
+
+  <text x="55" y="650" class="small">Solid blocks: current infrastructure baseline. Dashed amber blocks: planned or application-dependent.</text>
+</svg>
