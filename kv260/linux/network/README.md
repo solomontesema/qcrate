@@ -49,17 +49,20 @@ would add variables before the basic path is measured.
 
 ## Current observed state
 
-Before inserting the switch, the development PC was observed as:
+The accepted host-side physical path now uses a USB 3 Gigabit Ethernet adapter:
 
 ```text
-wlp2s0    192.168.1.104/24   connected through Wi-Fi
-enp3s0f1  no carrier         wired Ethernet cable absent
-router    192.168.1.254
-KV260     192.168.1.93       MAC 00:0a:35:0f:28:c4
+host wired interface  : enx00e04c681d13
+host wired address    : 192.168.1.92/24 (current DHCP address)
+adapter/driver        : RTL8153 / r8152
+negotiated link       : 1000 Mb/s, full duplex
+MTU                   : 1500
+KV260 address         : 192.168.1.93 (current DHCP address)
 ```
 
-This is suitable for SSH administration but not for the accepted throughput
-baseline: a PC-on-Wi-Fi/KV260-on-Ethernet result includes Wi-Fi behavior.
+The host route to `192.168.1.93` selects `enx00e04c681d13` with the lower route
+metric. The previous onboard `enp3s0f1` measurements negotiated at only
+10 Mb/s and are not valid evidence for Data Plane v1.
 
 ## Address ownership
 
@@ -109,17 +112,21 @@ Q-Crate starts temporary foreground servers explicitly during tests.
 3. Wait for link negotiation and DHCP.
 4. Confirm that traffic to the KV260 uses wired Ethernet.
 
-On the PC:
+On the PC, substitute the current wired interface if the USB adapter receives a
+different predictable name:
 
 ```bash
+HOST_IF=enx00e04c681d13
+KV260_IP=192.168.1.93
 ip -br link
 ip -br address
 ip route
-ip route get 192.168.1.93
-sudo ethtool enp3s0f1
+ip route get "$KV260_IP"
+sudo ethtool "$HOST_IF"
 ```
 
-The route lookup must report `dev enp3s0f1`, and `ethtool` should report:
+The route lookup must report the selected wired interface, and `ethtool` should
+report:
 
 ```text
 Speed: 1000Mb/s
@@ -149,15 +156,17 @@ cable, connectors, and switch-port negotiation first.
 The supplied standard-library script changes no network configuration. Run it
 on both endpoints and retain the reports under the ignored `build/` directory.
 
-On the PC, using the accepted wired host address as `HOST_IP`:
+Create a new timestamped directory for every acceptance run. Do not overwrite or
+mix results from a previous physical interface:
 
 ```bash
-mkdir -p build/network
+RUN="build/network/$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$RUN"
 python3 kv260/linux/network/network_baseline.py \
   --label host \
-  --interface enp3s0f1 \
+  --interface "$HOST_IF" \
   --peer 192.168.1.93 \
-  --output build/network/host.txt
+  --output "$RUN/host.txt"
 ```
 
 Copy the script to the board until it is packaged in a later image:
@@ -187,12 +196,47 @@ Return the target report to the repository build directory:
 
 ```bash
 scp petalinux@192.168.1.93:/tmp/kv260-network.txt \
-  build/network/kv260.txt
+  "$RUN/kv260.txt"
 ```
+
+## Automated throughput acceptance
+
+Start a temporary `iperf3` server on the KV260:
+
+```bash
+iperf3 -s
+```
+
+On the host, reuse the timestamped `$RUN` directory containing the endpoint
+snapshots. The runner permits those text reports but refuses to overwrite any
+existing iperf JSON or summary, so stale measurements cannot be mixed:
+
+```bash
+# Keep RUN set to the directory created for the endpoint snapshots above.
+test -n "$RUN"
+python3 kv260/linux/network/run_iperf.py \
+  --server 192.168.1.93 \
+  --output-dir "$RUN"
+cat "$RUN/iperf-summary.md"
+```
+
+This executes the TCP and UDP commands described below in both directions and
+validates every JSON document before publishing it. Review the complete command
+set without generating traffic with:
+
+```bash
+python3 kv260/linux/network/run_iperf.py \
+  --server 192.168.1.93 \
+  --output-dir build/network/not-created \
+  --dry-run
+```
+
+Stop the KV260 server with `Ctrl-C` after the sweep.
 
 ## TCP throughput
 
-Start a temporary server on the KV260:
+The automated runner uses these underlying commands. For a focused diagnostic,
+start a temporary server on the KV260:
 
 ```bash
 iperf3 -s
@@ -203,10 +247,10 @@ slow-start interval from the reported steady-state result:
 
 ```bash
 iperf3 -c 192.168.1.93 -t 30 -O 3 --get-server-output \
-  --json >build/network/tcp-host-to-kv260.json
+  --json >"$RUN/tcp-host-to-kv260.json"
 
 iperf3 -c 192.168.1.93 -R -t 30 -O 3 --get-server-output \
-  --json >build/network/tcp-kv260-to-host.json
+  --json >"$RUN/tcp-kv260-to-host.json"
 ```
 
 Stop the server with `Ctrl-C` after both runs. A healthy dedicated Gigabit path
@@ -224,13 +268,13 @@ Restart `iperf3 -s` on the KV260. Test increasing offered rates with a
 for rate in 100M 500M 800M 900M; do
   iperf3 -c 192.168.1.93 -u -b "$rate" -l 1400 -t 30 -O 3 \
     --get-server-output --json \
-    >"build/network/udp-host-to-kv260-${rate}.json"
+    >"$RUN/udp-host-to-kv260-${rate}.json"
 done
 
 for rate in 100M 500M 800M 900M; do
   iperf3 -c 192.168.1.93 -R -u -b "$rate" -l 1400 -t 30 -O 3 \
     --get-server-output --json \
-    >"build/network/udp-kv260-to-host-${rate}.json"
+    >"$RUN/udp-kv260-to-host-${rate}.json"
 done
 ```
 
@@ -247,12 +291,26 @@ Zero loss at a modest rate is more important to the first Q-Crate packetizer
 than reaching wire speed. The later streamer chooses an operating point below
 the measured loss boundary and implements explicit sequence/loss detection.
 
+Render the machine-generated JSON results as one compact Markdown table:
+
+```bash
+python3 kv260/linux/network/iperf_summary.py \
+  "$RUN"/*.json \
+  --output "$RUN/iperf-summary.md"
+cat "$RUN/iperf-summary.md"
+```
+
+The summary reports receiver throughput. Iperf's UDP aggregate byte/rate fields
+count offered datagrams even in reverse mode, while its loss fields report the
+receiver observation. The script therefore derives received rate as
+`transmitted_rate * (1 - loss_fraction)` in both directions.
+
 ## Packet capture
 
 Capture only Q-Crate-peer UDP traffic on the wired PC interface:
 
 ```bash
-sudo tcpdump -ni enp3s0f1 \
+sudo tcpdump -ni "$HOST_IF" \
   'host 192.168.1.93 and udp' \
   -w build/network/qcrate-udp.pcap
 ```
@@ -260,7 +318,7 @@ sudo tcpdump -ni enp3s0f1 \
 For a short text view without DNS or service-name lookups:
 
 ```bash
-sudo tcpdump -ni enp3s0f1 -nn -c 50 \
+sudo tcpdump -ni "$HOST_IF" -nn -c 50 \
   'host 192.168.1.93 and udp'
 ```
 
@@ -269,6 +327,11 @@ packet header will later receive a dissector or a compact validation script if
 ordinary UDP inspection is insufficient.
 
 ## Acceptance record
+
+The accepted 2026-08-29 Gigabit measurement, including the default-buffer loss
+near Q-Crate's intended stream rate, is recorded in
+[BASELINE.md](BASELINE.md). Use the following template when replacing it with a
+new network, host adapter, kernel, or receiver implementation.
 
 This milestone is complete when all entries are filled from wired tests:
 

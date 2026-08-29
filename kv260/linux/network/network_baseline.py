@@ -87,11 +87,17 @@ def main() -> int:
         ("Kernel", ["uname", "-a"]),
         ("Interface links", ["ip", "-br", "link"]),
         ("Interface addresses", ["ip", "-br", "address"]),
+        (
+            "Selected interface details",
+            ["ip", "-details", "link", "show", "dev", args.interface],
+        ),
         ("IPv4 routes", ["ip", "-4", "route"]),
         ("Peer route", ["ip", "route", "get", args.peer])
         if args.peer
         else ("Selected interface", ["ip", "address", "show", "dev", args.interface]),
         ("Ethernet link", ["ethtool", args.interface]),
+        ("Ethernet driver", ["ethtool", "-i", args.interface]),
+        ("Ethernet counters", ["ethtool", "-S", args.interface]),
         (
             "Socket limits",
             [
