@@ -21,15 +21,24 @@ module qcrate_stream_regs (
     output logic             continuous_o,
 
     output logic             start_cmd_o,
+    output logic             arm_triggered_cmd_o,
     output logic             abort_cmd_o,
     output logic             soft_reset_cmd_o,
 
     input  wire logic        command_busy_i,
     input  wire logic        stream_busy_i,
+    input  wire logic        stream_armed_i,
+    input  wire logic        trigger_seen_i,
+    input  wire logic        first_sample_time_valid_i,
     input  wire logic [31:0] completed_frames_i,
     input  wire logic [31:0] current_frame_id_i,
     input  wire logic [31:0] current_sample_index_i,
     input  wire logic [31:0] stall_cycles_i,
+    input  wire logic [31:0] trigger_shot_id_i,
+    input  wire logic [31:0] trigger_count_i,
+    input  wire logic [31:0] missed_trigger_count_i,
+    input  wire logic [63:0] trigger_time_i,
+    input  wire logic [63:0] first_sample_time_i,
 
     input  wire logic [31:0] irq_status_i,
     output logic [31:0]      irq_enable_o,
@@ -50,12 +59,21 @@ module qcrate_stream_regs (
     localparam logic [11:0] ADDR_IRQ_STATUS           = 12'h024;
     localparam logic [11:0] ADDR_IRQ_ENABLE           = 12'h028;
     localparam logic [11:0] ADDR_IRQ_CLEAR            = 12'h02C;
+    localparam logic [11:0] ADDR_TRIGGER_SHOT_ID      = 12'h030;
+    localparam logic [11:0] ADDR_TRIGGER_COUNT        = 12'h034;
+    localparam logic [11:0] ADDR_MISSED_TRIGGER_COUNT = 12'h038;
+    localparam logic [11:0] ADDR_TRIGGER_TIME_LOW     = 12'h03C;
+    localparam logic [11:0] ADDR_TRIGGER_TIME_HIGH    = 12'h040;
+    localparam logic [11:0] ADDR_FIRST_SAMPLE_TIME_LOW = 12'h044;
+    localparam logic [11:0] ADDR_FIRST_SAMPLE_TIME_HIGH = 12'h048;
 
     logic        apb_access;
     logic        addr_mapped;
     logic        write_allowed;
     logic [31:0] status_word;
     logic [31:0] control_word;
+    logic [31:0] trigger_time_high_latch_q;
+    logic [31:0] first_sample_time_high_latch_q;
 
     assign apb_access = psel_i && penable_i;
     assign pready_o = 1'b1;
@@ -70,7 +88,10 @@ module qcrate_stream_regs (
     assign status_word = {
         23'd0,
         command_busy_i,
-        4'd0,
+        1'b0,
+        first_sample_time_valid_i,
+        trigger_seen_i,
+        stream_armed_i,
         (stall_cycles_i != 32'd0),
         irq_status_i[1],
         irq_status_i[0],
@@ -137,6 +158,34 @@ module qcrate_stream_regs (
                 write_allowed = 1'b1;
             end
 
+            ADDR_TRIGGER_SHOT_ID: begin
+                prdata_o = trigger_shot_id_i;
+            end
+
+            ADDR_TRIGGER_COUNT: begin
+                prdata_o = trigger_count_i;
+            end
+
+            ADDR_MISSED_TRIGGER_COUNT: begin
+                prdata_o = missed_trigger_count_i;
+            end
+
+            ADDR_TRIGGER_TIME_LOW: begin
+                prdata_o = trigger_time_i[31:0];
+            end
+
+            ADDR_TRIGGER_TIME_HIGH: begin
+                prdata_o = trigger_time_high_latch_q;
+            end
+
+            ADDR_FIRST_SAMPLE_TIME_LOW: begin
+                prdata_o = first_sample_time_i[31:0];
+            end
+
+            ADDR_FIRST_SAMPLE_TIME_HIGH: begin
+                prdata_o = first_sample_time_high_latch_q;
+            end
+
             default: begin
                 addr_mapped = 1'b0;
             end
@@ -152,15 +201,27 @@ module qcrate_stream_regs (
             stream_mode_o <= 32'h0000_0000;
             continuous_o <= 1'b0;
             start_cmd_o <= 1'b0;
+            arm_triggered_cmd_o <= 1'b0;
             abort_cmd_o <= 1'b0;
             soft_reset_cmd_o <= 1'b0;
             irq_enable_o <= 32'h0000_0000;
             irq_clear_o <= 32'h0000_0000;
+            trigger_time_high_latch_q <= 32'h0000_0000;
+            first_sample_time_high_latch_q <= 32'h0000_0000;
         end else begin
             start_cmd_o <= 1'b0;
+            arm_triggered_cmd_o <= 1'b0;
             abort_cmd_o <= 1'b0;
             soft_reset_cmd_o <= 1'b0;
             irq_clear_o <= 32'h0000_0000;
+
+            if (apb_access && !pwrite_i) begin
+                if (paddr_i == ADDR_TRIGGER_TIME_LOW)
+                    trigger_time_high_latch_q <= trigger_time_i[63:32];
+                if (paddr_i == ADDR_FIRST_SAMPLE_TIME_LOW)
+                    first_sample_time_high_latch_q <=
+                        first_sample_time_i[63:32];
+            end
 
             if (apb_access && pwrite_i && write_allowed) begin
                 unique case (paddr_i)
@@ -168,6 +229,7 @@ module qcrate_stream_regs (
                         start_cmd_o <= pwdata_i[0];
                         abort_cmd_o <= pwdata_i[1];
                         soft_reset_cmd_o <= pwdata_i[2];
+                        arm_triggered_cmd_o <= pwdata_i[3];
                         continuous_o <= pwdata_i[8];
                     end
 

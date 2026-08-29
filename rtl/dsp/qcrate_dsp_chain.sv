@@ -33,6 +33,7 @@ module qcrate_dsp_chain #(
 
     logic signed [15:0] filtered_i;
     logic signed [15:0] filtered_q;
+    logic filtered_valid;
 
     qcrate_synthetic_source #(
         .SINE_LUT_FILE              (SINE_LUT_FILE),
@@ -79,11 +80,14 @@ module qcrate_dsp_chain #(
         .s_ready_o                  (mixed_ready),
         .m_i_o                      (filtered_i),
         .m_q_o                      (filtered_q),
-        .m_valid_o                  (m_valid_o),
+        .m_valid_o                  (filtered_valid),
         .m_ready_i                  (m_ready_i)
     );
 
     assign m_data_o = {filtered_q, filtered_i};
+    // Clear is synchronous inside the pipeline. Mask VALID immediately so a
+    // new capture cannot accept an old buffered word on the reset edge.
+    assign m_valid_o = filtered_valid && !clear_i;
 
 endmodule
 

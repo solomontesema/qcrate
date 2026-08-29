@@ -1,5 +1,5 @@
 SUMMARY = "Q-Crate DMAEngine capture driver"
-DESCRIPTION = "Receive-only DMAEngine client for Q-Crate single-frame and finite SG-chained AXI DMA S2MM capture."
+DESCRIPTION = "Receive-only DMAEngine client for immediate and hardware-triggered finite SG-chained Q-Crate capture."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 

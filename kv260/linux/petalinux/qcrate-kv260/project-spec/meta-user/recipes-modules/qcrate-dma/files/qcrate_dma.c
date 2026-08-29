@@ -11,6 +11,8 @@
  *
  * The critical transaction order is:
  *   reset stream -> configure frame -> arm S2MM -> start stream -> wait
+ * Triggered capture splits the last two steps so userspace can start the R5
+ * sequence only after ARM_TRIGGERED confirms both S2MM and the PL are armed.
  * Starting the stream before S2MM is armed is intentionally impossible through
  * this interface. Timeout and error paths reset the source and synchronously
  * terminate DMA so that the next capture begins from a defined state.
@@ -52,12 +54,24 @@
 #define QCRATE_STREAM_STALL_CYCLES      0x1020U
 #define QCRATE_STREAM_IRQ_ENABLE        0x1028U
 #define QCRATE_STREAM_IRQ_CLEAR         0x102cU
+#define QCRATE_STREAM_TRIGGER_SHOT_ID   0x1030U
+#define QCRATE_STREAM_TRIGGER_COUNT     0x1034U
+#define QCRATE_STREAM_MISSED_TRIGGERS   0x1038U
+#define QCRATE_STREAM_TRIGGER_TIME_LO   0x103cU
+#define QCRATE_STREAM_TRIGGER_TIME_HI   0x1040U
+#define QCRATE_STREAM_FIRST_TIME_LO     0x1044U
+#define QCRATE_STREAM_FIRST_TIME_HI     0x1048U
 
 #define QCRATE_CONTROL_START            BIT(0)
+#define QCRATE_CONTROL_ABORT            BIT(1)
 #define QCRATE_CONTROL_SOFT_RESET       BIT(2)
+#define QCRATE_CONTROL_ARM_TRIGGERED    BIT(3)
 #define QCRATE_STATUS_BUSY              BIT(0)
 #define QCRATE_STATUS_DONE              BIT(1)
 #define QCRATE_STATUS_ERROR             BIT(2)
+#define QCRATE_STATUS_ARMED             BIT(4)
+#define QCRATE_STATUS_TRIGGER_SEEN      BIT(5)
+#define QCRATE_STATUS_FIRST_TIME_VALID  BIT(6)
 #define QCRATE_STATUS_COMMAND_BUSY      BIT(8)
 
 #define QCRATE_STREAM_WORD_BYTES        4U
@@ -65,6 +79,7 @@
 #define QCRATE_MAX_BUFFER_BYTES         SZ_16M
 #define QCRATE_DEFAULT_TIMEOUT_MS       1000U
 #define QCRATE_MAX_TIMEOUT_MS           60000U
+#define QCRATE_CANCEL_TIMEOUT_MS        1000U
 #define QCRATE_STATUS_TIMEOUT_US        100000U
 
 /* All state owned by the single Q-Crate platform-device instance. */
@@ -86,6 +101,12 @@ struct qcrate_dma_dev {
 	struct completion completion;
 	struct dmaengine_result result;
 	struct mutex capture_lock;
+	bool triggered_active;
+	bool triggered_cancelled;
+	u32 triggered_frame_length_words;
+	u32 triggered_frame_count;
+	size_t triggered_frame_bytes;
+	size_t triggered_total_bytes;
 	atomic_t opened;
 	struct miscdevice miscdev;
 };
@@ -126,6 +147,15 @@ static int qcrate_wait_idle(struct qcrate_dma_dev *qdma, u32 *status)
 				  10, QCRATE_STATUS_TIMEOUT_US);
 }
 
+/* ARM_TRIGGERED is complete only when the stream domain reports ownership. */
+static int qcrate_wait_armed(struct qcrate_dma_dev *qdma, u32 *status)
+{
+	return readl_poll_timeout(qdma->regs + QCRATE_STREAM_STATUS, *status,
+				  (*status & QCRATE_STATUS_ARMED) &&
+				  !(*status & QCRATE_STATUS_COMMAND_BUSY),
+				  10, QCRATE_STATUS_TIMEOUT_US);
+}
+
 /*
  * DMA completion and Q-Crate DONE cross through separate paths. Require the
  * APB-visible terminal status as well as idle to avoid a false CDC race.
@@ -158,6 +188,74 @@ static int qcrate_reset_stream(struct qcrate_dma_dev *qdma)
 	return ret;
 }
 
+/* Validate a finite capture and derive its byte geometry without side effects. */
+static int qcrate_validate_capture(struct qcrate_dma_dev *qdma,
+				   u32 frame_length_words, u32 frame_count,
+				   u32 stream_mode, size_t *frame_bytes,
+				   size_t *total_bytes)
+{
+	if (!frame_length_words || !frame_count)
+		return -EINVAL;
+	if (stream_mode > 1)
+		return -EINVAL;
+	if (frame_count > QCRATE_DMA_MAX_CHAIN_FRAMES)
+		return -E2BIG;
+	if (frame_count > 1 && !qdma->has_sg)
+		return -EOPNOTSUPP;
+	if (check_mul_overflow((size_t)frame_length_words,
+			       (size_t)QCRATE_STREAM_WORD_BYTES, frame_bytes) ||
+	    check_mul_overflow(*frame_bytes, (size_t)frame_count, total_bytes))
+		return -EOVERFLOW;
+	if (*frame_bytes > qdma->max_transfer_bytes ||
+	    *total_bytes > qdma->buffer_bytes)
+		return -EMSGSIZE;
+	return 0;
+}
+
+/* Submit every frame before allowing either immediate or triggered start. */
+static int qcrate_submit_frames(struct qcrate_dma_dev *qdma,
+				size_t frame_bytes, u32 frame_count,
+				bool *descriptors_submitted)
+{
+	struct dma_async_tx_descriptor *desc;
+	dma_cookie_t cookie;
+	u32 frame;
+	int ret;
+
+	for (frame = 0; frame < frame_count; frame++) {
+		unsigned long flags = DMA_CTRL_ACK;
+
+		if (frame == frame_count - 1)
+			flags |= DMA_PREP_INTERRUPT;
+		desc = dmaengine_prep_slave_single(
+			qdma->rx_chan, qdma->buffer_dma + frame * frame_bytes,
+			frame_bytes, DMA_DEV_TO_MEM, flags);
+		if (!desc)
+			return -EIO;
+
+		if (frame == frame_count - 1) {
+			desc->callback_result = qcrate_dma_complete;
+			desc->callback_param = qdma;
+		}
+		cookie = dmaengine_submit(desc);
+		ret = dma_submit_error(cookie);
+		if (ret)
+			return ret;
+		*descriptors_submitted = true;
+	}
+	return 0;
+}
+
+/* APB low-word reads latch the matching high word in qcrate_stream_regs. */
+static u64 qcrate_read_timestamp(struct qcrate_dma_dev *qdma,
+				 u32 low_offset, u32 high_offset)
+{
+	u32 low = ioread32(qdma->regs + low_offset);
+	u32 high = ioread32(qdma->regs + high_offset);
+
+	return ((u64)high << 32) | low;
+}
+
 /*
  * Execute one finite stream command into consecutive frame slots. With SG
  * enabled, all DMA descriptors are submitted before START, so Linux is absent
@@ -169,41 +267,30 @@ static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
 			      u32 *timeout_ms,
 			      struct qcrate_capture_result *result)
 {
-	struct dma_async_tx_descriptor *desc;
-	dma_cookie_t cookie;
 	unsigned long wait_result;
 	size_t frame_bytes;
 	size_t total_bytes;
-	u32 frame;
 	u32 status;
 	bool descriptors_submitted = false;
 	int ret;
-
-	if (!frame_length_words || !frame_count)
-		return -EINVAL;
-	if (stream_mode > 1)
-		return -EINVAL;
-	if (frame_count > QCRATE_DMA_MAX_CHAIN_FRAMES)
-		return -E2BIG;
-	if (frame_count > 1 && !qdma->has_sg)
-		return -EOPNOTSUPP;
 
 	if (!*timeout_ms)
 		*timeout_ms = QCRATE_DEFAULT_TIMEOUT_MS;
 	if (*timeout_ms > QCRATE_MAX_TIMEOUT_MS)
 		return -EINVAL;
 
-	if (check_mul_overflow((size_t)frame_length_words,
-			       (size_t)QCRATE_STREAM_WORD_BYTES, &frame_bytes) ||
-	    check_mul_overflow(frame_bytes, (size_t)frame_count, &total_bytes))
-		return -EOVERFLOW;
-	if (frame_bytes > qdma->max_transfer_bytes ||
-	    total_bytes > qdma->buffer_bytes)
-		return -EMSGSIZE;
+	ret = qcrate_validate_capture(qdma, frame_length_words, frame_count,
+				      stream_mode, &frame_bytes, &total_bytes);
+	if (ret)
+		return ret;
 
 	ret = mutex_lock_interruptible(&qdma->capture_lock);
 	if (ret)
 		return ret;
+	if (qdma->triggered_active) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
 
 	ret = qcrate_reset_stream(qdma);
 	if (ret)
@@ -224,29 +311,10 @@ static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
 	iowrite32(0, qdma->regs + QCRATE_STREAM_IRQ_ENABLE);
 	iowrite32(0x3, qdma->regs + QCRATE_STREAM_IRQ_CLEAR);
 
-	for (frame = 0; frame < frame_count; frame++) {
-		unsigned long flags = DMA_CTRL_ACK;
-
-		if (frame == frame_count - 1)
-			flags |= DMA_PREP_INTERRUPT;
-		desc = dmaengine_prep_slave_single(
-			qdma->rx_chan, qdma->buffer_dma + frame * frame_bytes,
-			frame_bytes, DMA_DEV_TO_MEM, flags);
-		if (!desc) {
-			ret = -EIO;
-			goto out_reset;
-		}
-
-		if (frame == frame_count - 1) {
-			desc->callback_result = qcrate_dma_complete;
-			desc->callback_param = qdma;
-		}
-		cookie = dmaengine_submit(desc);
-		ret = dma_submit_error(cookie);
-		if (ret)
-			goto out_reset;
-		descriptors_submitted = true;
-	}
+	ret = qcrate_submit_frames(qdma, frame_bytes, frame_count,
+				   &descriptors_submitted);
+	if (ret)
+		goto out_reset;
 
 	/* Arm S2MM first; START may assert AXI4-Stream TVALID immediately. */
 	dma_async_issue_pending(qdma->rx_chan);
@@ -355,6 +423,262 @@ static int qcrate_capture_frames(struct qcrate_dma_dev *qdma,
 	return ret;
 }
 
+/*
+ * Complete and discard an armed transaction instead of halting AXI DMA while
+ * it waits for its first packet. The stream engine turns armed ABORT into a
+ * finite counter-pattern drain with the original descriptor geometry.
+ */
+static int qcrate_cancel_triggered_locked(struct qcrate_dma_dev *qdma)
+{
+	unsigned long wait_result;
+	u32 status;
+	int ret;
+
+	if (!qdma->triggered_active)
+		return 0;
+
+	status = ioread32(qdma->regs + QCRATE_STREAM_STATUS);
+	if (!(status & (QCRATE_STATUS_BUSY | QCRATE_STATUS_TRIGGER_SEEN))) {
+		iowrite32(QCRATE_CONTROL_ABORT,
+			  qdma->regs + QCRATE_STREAM_CONTROL);
+		usleep_range(10, 20);
+	}
+
+	wait_result = wait_for_completion_timeout(
+		&qdma->completion, msecs_to_jiffies(QCRATE_CANCEL_TIMEOUT_MS));
+	if (!wait_result) {
+		dev_err(qdma->dev,
+			"triggered cancel drain timed out; DMA remains owned\n");
+		return -ETIMEDOUT;
+	}
+
+	ret = qcrate_wait_complete(qdma, &status);
+	if (ret)
+		return ret;
+	if (qdma->result.result != DMA_TRANS_NOERROR || qdma->result.residue) {
+		dev_err(qdma->dev,
+			"triggered cancel drain failed: dma=%u residue=%u status=0x%08x\n",
+			qdma->result.result, qdma->result.residue, status);
+		return -EIO;
+	}
+
+	ret = qcrate_reset_stream(qdma);
+	if (ret)
+		return ret;
+	qdma->triggered_active = false;
+	qdma->triggered_cancelled = true;
+	return 0;
+}
+
+/*
+ * Establish the trigger-before-data ordering contract. This ioctl returns only
+ * after S2MM owns all destination descriptors and the PL source is armed.
+ */
+static int qcrate_arm_triggered(struct qcrate_dma_dev *qdma,
+				struct qcrate_dma_triggered_arm *arm)
+{
+	size_t frame_bytes;
+	size_t total_bytes;
+	u32 status;
+	bool descriptors_submitted = false;
+	int ret;
+
+	ret = qcrate_validate_capture(qdma, arm->frame_length_words,
+				      arm->frame_count, arm->stream_mode,
+				      &frame_bytes, &total_bytes);
+	if (ret)
+		return ret;
+
+	ret = mutex_lock_interruptible(&qdma->capture_lock);
+	if (ret)
+		return ret;
+	if (qdma->triggered_active) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
+	ret = qcrate_reset_stream(qdma);
+	if (ret)
+		goto out_unlock;
+
+	memset(qdma->buffer, 0xa5, total_bytes);
+	reinit_completion(&qdma->completion);
+	qdma->result.result = DMA_TRANS_ABORTED;
+	qdma->result.residue = frame_bytes;
+
+	iowrite32(0, qdma->regs + QCRATE_STREAM_CONTROL);
+	iowrite32(arm->frame_length_words,
+		  qdma->regs + QCRATE_STREAM_FRAME_LENGTH);
+	iowrite32(arm->frame_count, qdma->regs + QCRATE_STREAM_FRAME_COUNT);
+	iowrite32(arm->stream_mode, qdma->regs + QCRATE_STREAM_MODE);
+	iowrite32(0, qdma->regs + QCRATE_STREAM_IRQ_ENABLE);
+	iowrite32(0x3, qdma->regs + QCRATE_STREAM_IRQ_CLEAR);
+
+	ret = qcrate_submit_frames(qdma, frame_bytes, arm->frame_count,
+				   &descriptors_submitted);
+	if (ret)
+		goto out_terminate;
+
+	dma_async_issue_pending(qdma->rx_chan);
+	qdma->triggered_active = true;
+	qdma->triggered_cancelled = false;
+	qdma->triggered_frame_length_words = arm->frame_length_words;
+	qdma->triggered_frame_count = arm->frame_count;
+	qdma->triggered_frame_bytes = frame_bytes;
+	qdma->triggered_total_bytes = total_bytes;
+
+	iowrite32(QCRATE_CONTROL_ARM_TRIGGERED,
+		  qdma->regs + QCRATE_STREAM_CONTROL);
+	usleep_range(10, 20);
+	ret = qcrate_wait_armed(qdma, &status);
+	if (ret) {
+		dev_err(qdma->dev,
+			"triggered source did not arm (status 0x%08x)\n", status);
+		qcrate_cancel_triggered_locked(qdma);
+	}
+	goto out_unlock;
+
+out_terminate:
+	qcrate_reset_stream(qdma);
+	if (descriptors_submitted)
+		dmaengine_terminate_sync(qdma->rx_chan);
+out_unlock:
+	mutex_unlock(&qdma->capture_lock);
+	return ret;
+}
+
+/* Wait for the already-armed transaction and collect coherent trigger timing. */
+static int qcrate_wait_triggered(struct qcrate_dma_dev *qdma,
+				 struct qcrate_dma_triggered_result *result)
+{
+	unsigned long wait_result;
+	u32 status;
+	int ret;
+
+	if (!result->timeout_ms)
+		result->timeout_ms = QCRATE_DEFAULT_TIMEOUT_MS;
+	if (result->timeout_ms > QCRATE_MAX_TIMEOUT_MS)
+		return -EINVAL;
+
+	ret = mutex_lock_interruptible(&qdma->capture_lock);
+	if (ret)
+		return ret;
+	if (!qdma->triggered_active) {
+		ret = qdma->triggered_cancelled ? -ECANCELED : -EINVAL;
+		goto out_unlock;
+	}
+	mutex_unlock(&qdma->capture_lock);
+
+	wait_result = wait_for_completion_interruptible_timeout(
+		&qdma->completion, msecs_to_jiffies(result->timeout_ms));
+
+	ret = mutex_lock_interruptible(&qdma->capture_lock);
+	if (ret)
+		return ret;
+	if (!qdma->triggered_active) {
+		ret = -ECANCELED;
+		goto out_unlock;
+	}
+	if (!wait_result) {
+		ret = -ETIMEDOUT;
+		goto out_cancel;
+	}
+	if ((long)wait_result < 0) {
+		ret = (long)wait_result;
+		goto out_cancel;
+	}
+
+	ret = qcrate_wait_complete(qdma, &status);
+	if (ret)
+		goto out_cancel;
+
+	result->timestamp_flags = 0;
+	result->last_residue_bytes = min_t(u32, qdma->result.residue,
+					   qdma->triggered_frame_bytes);
+	result->dma_result = qdma->result.result;
+	result->stream_status = status;
+	result->completed_frames = ioread32(
+		qdma->regs + QCRATE_STREAM_COMPLETED_FRAMES);
+	result->current_frame_id = ioread32(
+		qdma->regs + QCRATE_STREAM_CURRENT_FRAME_ID);
+	result->current_sample_index = ioread32(
+		qdma->regs + QCRATE_STREAM_CURRENT_SAMPLE);
+	result->stall_cycles = ioread32(
+		qdma->regs + QCRATE_STREAM_STALL_CYCLES);
+	result->trigger_shot_id = ioread32(
+		qdma->regs + QCRATE_STREAM_TRIGGER_SHOT_ID);
+	result->trigger_count = ioread32(
+		qdma->regs + QCRATE_STREAM_TRIGGER_COUNT);
+	result->missed_trigger_count = ioread32(
+		qdma->regs + QCRATE_STREAM_MISSED_TRIGGERS);
+	result->trigger_time = qcrate_read_timestamp(
+		qdma, QCRATE_STREAM_TRIGGER_TIME_LO,
+		QCRATE_STREAM_TRIGGER_TIME_HI);
+	result->first_sample_time = qcrate_read_timestamp(
+		qdma, QCRATE_STREAM_FIRST_TIME_LO,
+		QCRATE_STREAM_FIRST_TIME_HI);
+	if (status & QCRATE_STATUS_TRIGGER_SEEN)
+		result->timestamp_flags |= QCRATE_DMA_TRIGGER_SEEN;
+	if (status & QCRATE_STATUS_FIRST_TIME_VALID)
+		result->timestamp_flags |= QCRATE_DMA_FIRST_SAMPLE_TIME_VALID;
+
+	if (result->dma_result != DMA_TRANS_NOERROR ||
+	    result->last_residue_bytes ||
+	    !(result->stream_status & QCRATE_STATUS_DONE) ||
+	    (result->stream_status & QCRATE_STATUS_ERROR) ||
+	    result->completed_frames != qdma->triggered_frame_count ||
+	    result->current_frame_id != qdma->triggered_frame_count - 1 ||
+	    result->current_sample_index !=
+			qdma->triggered_frame_length_words - 1 ||
+	    (result->timestamp_flags &
+		(QCRATE_DMA_TRIGGER_SEEN |
+		 QCRATE_DMA_FIRST_SAMPLE_TIME_VALID)) !=
+		(QCRATE_DMA_TRIGGER_SEEN |
+		 QCRATE_DMA_FIRST_SAMPLE_TIME_VALID) ||
+	    result->trigger_count != 1 ||
+	    result->missed_trigger_count != 0 ||
+	    result->first_sample_time < result->trigger_time) {
+		dev_err(qdma->dev,
+			"triggered capture failed: dma=%u residue=%u status=0x%08x "
+			"frames=%u/%u frame=%u sample=%u flags=0x%x\n",
+			result->dma_result, result->last_residue_bytes,
+			result->stream_status, result->completed_frames,
+			qdma->triggered_frame_count, result->current_frame_id,
+			result->current_sample_index, result->timestamp_flags);
+		ret = -EIO;
+		goto out_cancel;
+	}
+
+	result->transferred_bytes = qdma->triggered_total_bytes;
+	qdma->triggered_active = false;
+	qdma->triggered_cancelled = false;
+	ret = 0;
+	goto out_unlock;
+
+out_cancel:
+	if (qcrate_cancel_triggered_locked(qdma))
+		dev_err(qdma->dev, "failed to recover triggered transaction\n");
+out_unlock:
+	mutex_unlock(&qdma->capture_lock);
+	return ret;
+}
+
+static int qcrate_cancel_triggered(struct qcrate_dma_dev *qdma)
+{
+	int ret;
+
+	ret = mutex_lock_interruptible(&qdma->capture_lock);
+	if (ret)
+		return ret;
+	if (!qdma->triggered_active) {
+		ret = -EINVAL;
+	} else {
+		ret = qcrate_cancel_triggered_locked(qdma);
+	}
+	mutex_unlock(&qdma->capture_lock);
+	return ret;
+}
+
 /* Implement the fixed-width UAPI declared in qcrate_dma_uapi.h. */
 static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 			     unsigned long argument)
@@ -363,6 +687,8 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 	void __user *user_arg = (void __user *)argument;
 	struct qcrate_dma_capture capture;
 	struct qcrate_dma_capture_frames capture_frames;
+	struct qcrate_dma_triggered_arm triggered_arm;
+	struct qcrate_dma_triggered_result triggered_result;
 	struct qcrate_dma_info info = {
 		.abi_version = QCRATE_DMA_ABI_VERSION,
 		.buffer_bytes = qdma->buffer_bytes,
@@ -372,6 +698,7 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 	struct qcrate_dma_caps caps = {
 		.abi_version = QCRATE_DMA_ABI_VERSION,
 		.feature_flags = QCRATE_DMA_CAP_DSP_MODE |
+			QCRATE_DMA_CAP_TRIGGERED |
 			(qdma->has_sg ? QCRATE_DMA_CAP_SG_CHAIN : 0),
 		.max_chain_frames = qdma->has_sg ?
 			QCRATE_DMA_MAX_CHAIN_FRAMES : 1,
@@ -414,6 +741,32 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 			return -EFAULT;
 		return ret;
 
+	case QCRATE_DMA_IOC_ARM_TRIGGERED:
+		if (copy_from_user(&triggered_arm, user_arg,
+				   sizeof(triggered_arm)))
+			return -EFAULT;
+		if (memchr_inv(triggered_arm.reserved, 0,
+			       sizeof(triggered_arm.reserved)))
+			return -EINVAL;
+		return qcrate_arm_triggered(qdma, &triggered_arm);
+
+	case QCRATE_DMA_IOC_WAIT_TRIGGERED:
+		if (copy_from_user(&triggered_result, user_arg,
+				   sizeof(triggered_result)))
+			return -EFAULT;
+		if (triggered_result.reserved0 ||
+		    memchr_inv(triggered_result.reserved, 0,
+			       sizeof(triggered_result.reserved)))
+			return -EINVAL;
+		ret = qcrate_wait_triggered(qdma, &triggered_result);
+		if (copy_to_user(user_arg, &triggered_result,
+				 sizeof(triggered_result)))
+			return -EFAULT;
+		return ret;
+
+	case QCRATE_DMA_IOC_CANCEL_TRIGGERED:
+		return qcrate_cancel_triggered(qdma);
+
 	default:
 		return -ENOTTY;
 	}
@@ -437,6 +790,10 @@ static int qcrate_dma_release(struct inode *inode, struct file *file)
 {
 	struct qcrate_dma_dev *qdma = file->private_data;
 
+	mutex_lock(&qdma->capture_lock);
+	if (qcrate_cancel_triggered_locked(qdma))
+		dev_err(qdma->dev, "release left triggered DMA transaction active\n");
+	mutex_unlock(&qdma->capture_lock);
 	atomic_set(&qdma->opened, 0);
 	return 0;
 }

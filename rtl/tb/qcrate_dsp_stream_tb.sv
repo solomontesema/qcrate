@@ -12,9 +12,13 @@ module qcrate_dsp_stream_tb #(
     logic clk;
     logic rst_n;
     logic start;
+    logic arm_triggered;
+    logic shot_trigger;
     logic abort_cmd;
     logic soft_reset;
     logic busy;
+    logic armed;
+    logic capture_start_pulse;
     logic done_pulse;
     logic error_pulse;
     logic [31:0] completed_frames;
@@ -24,6 +28,7 @@ module qcrate_dsp_stream_tb #(
 
     logic dsp_enable;
     logic dsp_clear;
+    logic dsp_clear_test;
     logic [31:0] dsp_data;
     logic dsp_valid;
     logic dsp_ready;
@@ -36,7 +41,8 @@ module qcrate_dsp_stream_tb #(
 
     logic [31:0] expected_words [0:OUTPUT_COUNT-1];
 
-    assign dsp_clear = start || soft_reset;
+    assign dsp_clear = start || arm_triggered || capture_start_pulse ||
+                       soft_reset || dsp_clear_test;
 
     qcrate_dsp_chain #(
         .SINE_LUT_FILE              (SINE_LUT_FILE)
@@ -54,8 +60,12 @@ module qcrate_dsp_stream_tb #(
         .clk_i                      (clk),
         .rst_n_i                    (rst_n),
         .start_i                    (start),
+        .arm_triggered_i            (arm_triggered),
+        .shot_trigger_i             (shot_trigger),
         .abort_i                    (abort_cmd),
         .soft_reset_i               (soft_reset),
+        .trigger_shot_id_i          (32'd0),
+        .timebase_i                 (64'd0),
         .frame_length_i             (FRAME_LENGTH),
         .frame_count_i              (FRAME_COUNT),
         .stream_mode_i              (32'd1),
@@ -65,8 +75,17 @@ module qcrate_dsp_stream_tb #(
         .dsp_enable_o               (dsp_enable),
         .dsp_tready_o               (dsp_ready),
         .busy_o                     (busy),
+        .armed_o                    (armed),
+        .capture_start_pulse_o      (capture_start_pulse),
         .done_pulse_o               (done_pulse),
         .error_pulse_o              (error_pulse),
+        .trigger_seen_o             (),
+        .first_sample_time_valid_o  (),
+        .trigger_shot_id_o          (),
+        .trigger_count_o            (),
+        .missed_trigger_count_o     (),
+        .trigger_time_o             (),
+        .first_sample_time_o        (),
         .completed_frames_o         (completed_frames),
         .current_frame_id_o         (current_frame_id),
         .current_sample_index_o     (current_sample_index),
@@ -114,8 +133,11 @@ module qcrate_dsp_stream_tb #(
         clk = 1'b0;
         rst_n = 1'b0;
         start = 1'b0;
+        arm_triggered = 1'b0;
+        shot_trigger = 1'b0;
         abort_cmd = 1'b0;
         soft_reset = 1'b0;
+        dsp_clear_test = 1'b0;
         axis_ready = 1'b0;
         repeat (12) @(posedge clk);
         rst_n = 1'b1;
@@ -192,6 +214,80 @@ module qcrate_dsp_stream_tb #(
         if (stall_cycles == 0) begin
             $fatal(1, "DSP test applied no observable backpressure");
         end
+
+        // Repeat the complete golden vector through the triggered path. This
+        // proves that arm/trigger clearing does not leak a buffered word or
+        // prior NCO/FIR history into the next acquisition.
+        @(negedge clk);
+        axis_ready = 1'b0;
+        arm_triggered = 1'b1;
+        @(negedge clk);
+        arm_triggered = 1'b0;
+        if (!armed || busy) begin
+            $fatal(1, "DSP triggered path did not arm cleanly");
+        end
+        repeat (8) @(posedge clk);
+        @(negedge clk);
+        shot_trigger = 1'b1;
+        @(negedge clk);
+        shot_trigger = 1'b0;
+        if (!busy || armed) begin
+            $fatal(1, "DSP triggered path did not start cleanly");
+        end
+
+        output_count = 0;
+        guard = 0;
+        axis_ready = 1'b1;
+        while (busy && (guard < 200000)) begin
+            @(negedge clk);
+            transfer = axis_valid && axis_ready;
+            transferred_data = axis_data;
+            transferred_last = axis_last;
+            @(posedge clk);
+            #1;
+            if (transfer) begin
+                if (transferred_data !== expected_words[output_count]) begin
+                    $fatal(1,
+                           "Triggered DSP word %0d mismatch: actual=0x%08h expected=0x%08h",
+                           output_count, transferred_data,
+                           expected_words[output_count]);
+                end
+                if (transferred_last !==
+                    ((output_count % FRAME_LENGTH) == (FRAME_LENGTH - 1))) begin
+                    $fatal(1, "Triggered DSP TLAST mismatch at output %0d",
+                           output_count);
+                end
+                output_count++;
+            end
+            guard++;
+        end
+        if ((guard >= 200000) || (output_count != OUTPUT_COUNT)) begin
+            $fatal(1, "Triggered DSP output count %0d, expected %0d",
+                   output_count, OUTPUT_COUNT);
+        end
+
+        // Start another acquisition with its output stalled, then verify that
+        // clear suppresses a buffered VALID before the synchronous reset edge.
+        @(negedge clk);
+        axis_ready = 1'b0;
+        start = 1'b1;
+        @(negedge clk);
+        start = 1'b0;
+        guard = 0;
+        while (!dsp_valid && (guard < 10000)) begin
+            @(negedge clk);
+            guard++;
+        end
+        if (!dsp_valid) begin
+            $fatal(1, "DSP did not buffer an output for clear/valid test");
+        end
+        dsp_clear_test = 1'b1;
+        #1;
+        if (dsp_valid) begin
+            $fatal(1, "DSP VALID remained asserted during clear");
+        end
+        @(negedge clk);
+        dsp_clear_test = 1'b0;
 
         pass_file = $fopen({vector_dir, "/dsp2b.pass"}, "w");
         if (pass_file == 0) begin

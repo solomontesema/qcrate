@@ -89,6 +89,7 @@ module qcrate_core #(
     logic        cfg_continuous_ctrl;
 
     logic        start_cmd_ctrl;
+    logic        arm_triggered_cmd_ctrl;
     logic        abort_cmd_ctrl;
     logic        soft_reset_cmd_ctrl;
     logic        command_busy_ctrl;
@@ -103,6 +104,7 @@ module qcrate_core #(
     logic        active_continuous_stream;
 
     logic        start_pulse_stream;
+    logic        arm_triggered_pulse_stream;
     logic        abort_pulse_stream;
     logic        soft_reset_pulse_stream;
 
@@ -111,8 +113,18 @@ module qcrate_core #(
     // ============================================================
 
     logic        stream_busy;
+    logic        stream_armed;
+    logic        stream_capture_start_pulse;
     logic        stream_done_pulse;
     logic        stream_error_pulse;
+
+    logic        stream_trigger_seen;
+    logic        stream_first_sample_time_valid;
+    logic [31:0] stream_trigger_shot_id;
+    logic [31:0] stream_trigger_count;
+    logic [31:0] stream_missed_trigger_count;
+    logic [63:0] stream_trigger_time;
+    logic [63:0] stream_first_sample_time;
 
     logic [31:0] completed_frames_stream;
     logic [31:0] current_frame_id_stream;
@@ -130,10 +142,18 @@ module qcrate_core #(
     // ============================================================
 
     logic        stream_busy_ctrl;
+    logic        stream_armed_ctrl;
+    logic        stream_trigger_seen_ctrl;
+    logic        stream_first_sample_time_valid_ctrl;
     logic [31:0] completed_frames_ctrl;
     logic [31:0] current_frame_id_ctrl;
     logic [31:0] current_sample_index_ctrl;
     logic [31:0] stall_cycles_ctrl;
+    logic [31:0] stream_trigger_shot_id_ctrl;
+    logic [31:0] stream_trigger_count_ctrl;
+    logic [31:0] stream_missed_trigger_count_ctrl;
+    logic [63:0] stream_trigger_time_ctrl;
+    logic [63:0] stream_first_sample_time_ctrl;
 
     // ============================================================
     // Interrupt signals
@@ -186,6 +206,7 @@ module qcrate_core #(
     logic sequence_done_pulse_stream;
     logic sequence_aborted_pulse_stream;
     logic sequence_fault_pulse_stream;
+    logic sequence_shot_start_pulse_stream;
     logic [7:0] sequence_fault_code_stream;
     logic [SEQUENCE_ADDR_WIDTH-1:0] sequence_fault_index_stream;
     logic [SEQUENCE_ADDR_WIDTH-1:0] sequence_active_index_stream;
@@ -289,15 +310,24 @@ module qcrate_core #(
         .continuous_o               (cfg_continuous_ctrl),
 
         .start_cmd_o                (start_cmd_ctrl),
+        .arm_triggered_cmd_o        (arm_triggered_cmd_ctrl),
         .abort_cmd_o                (abort_cmd_ctrl),
         .soft_reset_cmd_o           (soft_reset_cmd_ctrl),
 
         .command_busy_i             (command_busy_ctrl),
         .stream_busy_i              (stream_busy_ctrl),
+        .stream_armed_i             (stream_armed_ctrl),
+        .trigger_seen_i             (stream_trigger_seen_ctrl),
+        .first_sample_time_valid_i  (stream_first_sample_time_valid_ctrl),
         .completed_frames_i         (completed_frames_ctrl),
         .current_frame_id_i         (current_frame_id_ctrl),
         .current_sample_index_i     (current_sample_index_ctrl),
         .stall_cycles_i             (stall_cycles_ctrl),
+        .trigger_shot_id_i          (stream_trigger_shot_id_ctrl),
+        .trigger_count_i            (stream_trigger_count_ctrl),
+        .missed_trigger_count_i     (stream_missed_trigger_count_ctrl),
+        .trigger_time_i             (stream_trigger_time_ctrl),
+        .first_sample_time_i        (stream_first_sample_time_ctrl),
 
         .irq_status_i               (irq_status_ctrl),
         .irq_enable_o               (irq_enable_ctrl),
@@ -433,6 +463,7 @@ module qcrate_core #(
         .done_pulse_o               (sequence_done_pulse_stream),
         .aborted_pulse_o            (sequence_aborted_pulse_stream),
         .fault_pulse_o              (sequence_fault_pulse_stream),
+        .shot_start_pulse_o         (sequence_shot_start_pulse_stream),
         .fault_code_o               (sequence_fault_code_stream),
         .fault_event_index_o        (sequence_fault_index_stream),
         .active_event_index_o       (sequence_active_index_stream),
@@ -503,6 +534,7 @@ module qcrate_core #(
         .continuous_i               (cfg_continuous_ctrl),
 
         .start_cmd_i                (start_cmd_ctrl),
+        .arm_triggered_cmd_i        (arm_triggered_cmd_ctrl),
         .abort_cmd_i                (abort_cmd_ctrl),
         .soft_reset_cmd_i           (soft_reset_cmd_ctrl),
         .command_busy_o             (command_busy_ctrl),
@@ -516,6 +548,7 @@ module qcrate_core #(
         .active_continuous_o        (active_continuous_stream),
 
         .start_pulse_o              (start_pulse_stream),
+        .arm_triggered_pulse_o      (arm_triggered_pulse_stream),
         .abort_pulse_o              (abort_pulse_stream),
         .soft_reset_pulse_o         (soft_reset_pulse_stream)
     );
@@ -524,7 +557,10 @@ module qcrate_core #(
     // Main stream-producing engine
     // ============================================================
 
-    assign dsp_stream_clear = start_pulse_stream || soft_reset_pulse_stream;
+    assign dsp_stream_clear = start_pulse_stream ||
+                              arm_triggered_pulse_stream ||
+                              stream_capture_start_pulse ||
+                              soft_reset_pulse_stream;
 
     qcrate_dsp_chain #(
         // Vivado stages tracked .mem sources into each synthesis run.
@@ -546,8 +582,12 @@ module qcrate_core #(
         .rst_n_i                    (rst_stream_n_i),
 
         .start_i                    (start_pulse_stream),
+        .arm_triggered_i            (arm_triggered_pulse_stream),
+        .shot_trigger_i             (sequence_shot_start_pulse_stream),
         .abort_i                    (abort_pulse_stream),
         .soft_reset_i               (soft_reset_pulse_stream),
+        .trigger_shot_id_i          (sequence_completed_shots_stream + 32'd1),
+        .timebase_i                 (sequence_timebase_stream),
 
         .frame_length_i             (active_frame_length_stream),
         .frame_count_i              (active_frame_count_stream),
@@ -560,8 +600,18 @@ module qcrate_core #(
         .dsp_tready_o               (dsp_stream_ready),
 
         .busy_o                     (stream_busy),
+        .armed_o                    (stream_armed),
+        .capture_start_pulse_o      (stream_capture_start_pulse),
         .done_pulse_o               (stream_done_pulse),
         .error_pulse_o              (stream_error_pulse),
+
+        .trigger_seen_o             (stream_trigger_seen),
+        .first_sample_time_valid_o  (stream_first_sample_time_valid),
+        .trigger_shot_id_o          (stream_trigger_shot_id),
+        .trigger_count_o            (stream_trigger_count),
+        .missed_trigger_count_o     (stream_missed_trigger_count),
+        .trigger_time_o             (stream_trigger_time),
+        .first_sample_time_o        (stream_first_sample_time),
 
         .completed_frames_o         (completed_frames_stream),
         .current_frame_id_o         (current_frame_id_stream),
@@ -584,19 +634,35 @@ module qcrate_core #(
         .stream_rst_n_i             (rst_stream_n_i),
 
         .stream_busy_i              (stream_busy),
+        .stream_armed_i             (stream_armed),
+        .trigger_seen_i             (stream_trigger_seen),
+        .first_sample_time_valid_i  (stream_first_sample_time_valid),
         .completed_frames_i         (completed_frames_stream),
         .current_frame_id_i         (current_frame_id_stream),
         .current_sample_index_i     (current_sample_index_stream),
         .stall_cycles_i             (stall_cycles_stream),
+        .trigger_shot_id_i          (stream_trigger_shot_id),
+        .trigger_count_i            (stream_trigger_count),
+        .missed_trigger_count_i     (stream_missed_trigger_count),
+        .trigger_time_i             (stream_trigger_time),
+        .first_sample_time_i        (stream_first_sample_time),
 
         .ctrl_clk_i                 (clk_ctrl_i),
         .ctrl_rst_n_i               (rst_ctrl_n_i),
 
         .stream_busy_o              (stream_busy_ctrl),
+        .stream_armed_o             (stream_armed_ctrl),
+        .trigger_seen_o             (stream_trigger_seen_ctrl),
+        .first_sample_time_valid_o  (stream_first_sample_time_valid_ctrl),
         .completed_frames_o         (completed_frames_ctrl),
         .current_frame_id_o         (current_frame_id_ctrl),
         .current_sample_index_o     (current_sample_index_ctrl),
-        .stall_cycles_o             (stall_cycles_ctrl)
+        .stall_cycles_o             (stall_cycles_ctrl),
+        .trigger_shot_id_o          (stream_trigger_shot_id_ctrl),
+        .trigger_count_o            (stream_trigger_count_ctrl),
+        .missed_trigger_count_o     (stream_missed_trigger_count_ctrl),
+        .trigger_time_o             (stream_trigger_time_ctrl),
+        .first_sample_time_o        (stream_first_sample_time_ctrl)
     );
 
     // ============================================================

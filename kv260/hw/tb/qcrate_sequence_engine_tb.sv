@@ -35,6 +35,7 @@ module qcrate_sequence_engine_tb;
     logic                  done_pulse;
     logic                  aborted_pulse;
     logic                  fault_pulse;
+    logic                  shot_start_pulse;
     logic [7:0]            fault_code;
     logic [ADDR_WIDTH-1:0] fault_event_index;
     logic [ADDR_WIDTH-1:0] active_event_index;
@@ -73,6 +74,7 @@ module qcrate_sequence_engine_tb;
         .done_pulse_o              (done_pulse),
         .aborted_pulse_o           (aborted_pulse),
         .fault_pulse_o             (fault_pulse),
+        .shot_start_pulse_o        (shot_start_pulse),
         .fault_code_o              (fault_code),
         .fault_event_index_o       (fault_event_index),
         .active_event_index_o      (active_event_index),
@@ -242,6 +244,8 @@ module qcrate_sequence_engine_tb;
         expect_bit(validating, 1'b0, "consecutive validation complete");
         pulse_signal(start);
         expect_bit(busy, 1'b1, "consecutive sequence running");
+        expect_bit(shot_start_pulse, 1'b1,
+                   "software start emits semantic shot start");
         if (start_time >= timebase)
             fail("start time was not captured before the running timebase advanced");
         @(posedge clk); #1;
@@ -276,6 +280,8 @@ module qcrate_sequence_engine_tb;
         wait_for_armed("external-trigger sequence");
         pulse_signal(external_trigger);
         expect_bit(busy, 1'b1, "external trigger starts run");
+        expect_bit(shot_start_pulse, 1'b1,
+                   "external trigger emits semantic shot start");
         @(posedge clk); #1; expect_pulse(2'b00, "external tick 0");
         @(posedge clk); #1; expect_pulse(2'b00, "external tick 1");
         @(posedge clk); #1; expect_pulse(2'b01, "external tick 2");

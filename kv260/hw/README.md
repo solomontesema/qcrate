@@ -231,6 +231,7 @@ CCACHE_DISABLE=1 verilator --binary --timing -Wall \
   --top-module qcrate_stream_engine_tb \
   --Mdir build/verilator/qcrate_stream_engine_tb \
   kv260/hw/tb/qcrate_stream_engine_tb.sv \
+  kv260/hw/rtl/qcrate_timebase.sv \
   kv260/hw/rtl/qcrate_stream_engine.sv
 
 ./build/verilator/qcrate_stream_engine_tb/Vqcrate_stream_engine_tb
@@ -242,7 +243,13 @@ Expected result:
 PASS: qcrate_stream_engine_tb
 ```
 
-The test covers one-word frames, multi-word finite frames, continuous mode, `TLAST`, `TKEEP`, held AXI4-Stream outputs during backpressure, graceful abort after the currently presented word is accepted, soft reset, and invalid start configuration.
+The test covers one-word frames, multi-word finite frames, continuous mode,
+`TLAST`, `TKEEP`, held AXI4-Stream outputs during backpressure, packet-complete
+finite abort, soft reset, and invalid configuration. It also verifies that an
+early trigger is counted but ignored, triggered arm produces no data, a later
+trigger starts the capture, and the exact first `TVALID && TREADY` time is
+retained across stalls. Armed cancellation emits one finite internal-pattern
+drain so an already-issued DMA descriptor is never left incomplete.
 
 `STREAM_MODE=0` selects this counter source and `STREAM_MODE=1` selects the
 complete complex DSP chain documented in `rtl/dsp/README.md`. Other values are
@@ -255,6 +262,7 @@ A lightweight Vivado parser check for the same area is:
 source /tools/Xilinx/Vivado/2024.2/settings64.sh
 
 xvlog --sv \
+  kv260/hw/rtl/qcrate_timebase.sv \
   kv260/hw/rtl/qcrate_stream_engine.sv \
   kv260/hw/tb/qcrate_stream_engine_tb.sv \
   kv260/hw/rtl/qcrate_core.sv

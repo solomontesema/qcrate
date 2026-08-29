@@ -32,6 +32,8 @@ Current source scope:
 - timeout, stream reset, and DMA termination recovery;
 - complete verification of `{frame_id[15:0], sample_index[15:0]}`;
 - exact verification of DSP IQ words selected by `STREAM_MODE=1`;
+- DMA-before-trigger ownership with separate arm, wait, and cancel operations;
+- coherent shot identity, accepted-trigger time, and first-transfer time;
 - backward-compatible one-frame capture and repeat testing.
 
 Cyclic rings, indefinite acquisition, concurrent userspace consumption, and
@@ -173,6 +175,67 @@ latency and obscures failures. SG may still apply short hardware backpressure
 while fetching descriptors; correctness requires no lost or duplicated words,
 not a promise that `TREADY` can never deassert.
 
+## Trigger and timestamp contract
+
+DP-5A preserves immediate `START` and adds a separate triggered transaction:
+
+```text
+A53 asks R5 to arm the committed sequence
+        |
+        v
+qcrate_dma ARM_TRIGGERED
+  reset source -> configure -> submit every SG descriptor
+  -> issue S2MM -> wait until PL reports ARMED
+        |
+        v
+A53 asks R5 to start the sequence
+        |
+        v
+sequencer ARMED -> RUN semantic shot-start pulse
+        |
+        v
+stream trigger timestamp -> DSP reset/start -> first AXI transfer timestamp
+        |
+        v
+qcrate_dma WAIT_TRIGGERED -> exact IQ verification and timing evidence
+```
+
+The acquisition event is the sequencer's semantic transition into `RUN`. It is
+not derived from a selected pulse-output bit, so changing a pulse pattern does
+not silently change acquisition timing. The PL rejects data production until
+the stream engine is armed. Triggers seen while not armed are counted and do
+not start a transfer.
+
+The canonical UAPI remains ABI version 1 because the existing structures and
+ioctls are unchanged. `QCRATE_DMA_CAP_TRIGGERED` advertises three additional
+operations:
+
+| Operation | Ownership transition |
+| --- | --- |
+| `ARM_TRIGGERED` | Validate geometry, own the coherent buffer, pre-arm all DMA descriptors, then arm the PL source |
+| `WAIT_TRIGGERED` | Wait with a bounded timeout and return DMA, stream, shot, and timestamp evidence |
+| `CANCEL_TRIGGERED` | Drain every issued descriptor with discard data, then soft-reset and release the transaction |
+
+Closing `/dev/qcrate-dma` also cancels an outstanding triggered transaction.
+This prevents abandoned userspace state from leaving S2MM or the PL source
+armed indefinitely.
+
+The drain is required by the deployed Xilinx 2024.2 AXI DMA provider. Its
+`terminate_all` path clears `RUNSTOP` and polls `HALTED` atomically; an SG S2MM
+descriptor waiting for its first packet does not halt promptly and can trigger
+an RCU CPU-stall report. Q-Crate therefore does not invoke provider termination
+for a normal triggered cancellation. If the shot has not started, armed
+`ABORT` switches the stream engine to its internal counter source and fills the
+original finite descriptor geometry. If the shot has already started, the
+finite capture completes normally. In both cases the resulting buffer is
+discarded and no partial AXI packet or descriptor remains.
+
+`TRIGGER_TIME` is sampled from the shared 200 MHz timebase when the armed shot
+is accepted. `FIRST_SAMPLE_TIME` is sampled only when the first output word is
+actually transferred (`TVALID && TREADY`). Their difference therefore includes
+the deterministic DSP pipeline latency and any initial DMA backpressure. It is
+not merely the cycle when `TVALID` first asserted.
+
 ## AXI DMA SG and length limits
 
 The accepted simple-mode XSA reported:
@@ -252,9 +315,9 @@ python3 rtl/dsp/xilinx/run_test.py --test chain
 
 Success requires all 256 words and four `TLAST` boundaries to match the Python
 model. Then recreate the Vivado project from tracked sources and export a
-matching bitstream and XSA. DSP-2B does not change the block design, but it
-does change the PL datapath and DMA client UAPI, so the bitstream, module,
-userspace package, and SD-card image must be deployed together:
+matching bitstream and XSA. DP-5A does not change the block design, but it does
+change the PL datapath and DMA client UAPI, so the bitstream, module, userspace
+packages, and SD-card image must be deployed together:
 
 ```bash
 cd /tools/fpga_projects/qcrate
@@ -288,6 +351,7 @@ build:
 cd kv260/linux/petalinux/qcrate-kv260
 petalinux-build -c qcrate-dma
 petalinux-build -c qcrate-dma-tools
+petalinux-build -c qcrate-tools
 petalinux-build -c qcrate-firmware
 cd /tools/fpga_projects/qcrate
 ```
@@ -348,6 +412,7 @@ maximum frame      : 262144 words
 SG frame chaining  : yes
 maximum SG frames  : 255
 DSP stream mode    : yes
+triggered capture : yes
 ```
 
 First rerun the backward-compatible one-frame path. Omitting `--words` now
@@ -431,6 +496,47 @@ capture. Those options alter framing and capture length, not the frozen DSP
 experiment. The expected sequence always starts at sample zero for each new
 capture command.
 
+Load and commit a sequence once, then exercise the DP-5A ordering contract:
+
+```bash
+sudo qcrate-sequence reset
+sudo qcrate-sequence load ~/qcrate/two_channel_demo.qseq
+sudo qcrate-dma test-trigger-cancel
+sudo qcrate-dma capture-triggered
+```
+
+`test-trigger-cancel` first arms S2MM and the PL without starting a shot, calls
+the explicit cancel operation, and then verifies a complete immediate capture.
+It is the target regression for abandoned-transaction cleanup and recovery.
+
+`capture-triggered` performs each shot in this order: R5 sequence arm, DMA/PL
+arm, R5 sequence start, DMA wait, and exact DSP verification. It keeps the DMA
+file descriptor open across the complete transaction and cancels automatically
+if sequence start or completion fails. Expected evidence includes:
+
+```text
+PASS 1 triggered DSP capture(s), 4 frame(s) x 1024 words; every IQ word matched
+shot ID            : 1
+trigger time       : <shared-timebase ticks>
+first sample time  : <later shared-timebase ticks>
+trigger-to-sample  : <nonnegative ticks>
+trigger count      : 1
+missed triggers    : 0
+```
+
+Repeat complete shots to prove rearming, per-shot DSP reset, and deterministic
+payload reproduction:
+
+```bash
+sudo qcrate-dma capture-triggered --repeat 10 \
+  --output /tmp/qcrate-triggered-dsp.bin
+```
+
+Each iteration re-arms the already committed R5 sequence before arming DMA.
+The shot ID increases with the sequencer's completed-shot counter, while the
+stream-local trigger count is one because stream soft reset defines a new
+capture transaction.
+
 For visual host-side inspection, save the accepted default capture:
 
 ```bash
@@ -510,10 +616,19 @@ sudo dmesg | tail -100
 sudo qcrate-apb dump
 ```
 
-The timeout path soft-resets the stream and synchronously terminates DMA, so a
-subsequent capture should start from a defined state. A repeating timeout still
-indicates a hardware, interrupt, device-tree, or stream-handshake problem and
-should be diagnosed rather than hidden by retries.
+The triggered timeout path drains and discards all issued descriptors before
+reset, so a subsequent capture starts from a defined state without entering
+the provider's unsafe pre-packet halt path. The legacy immediate-capture error
+path still uses synchronous provider termination after stopping its active
+source. A repeating timeout indicates a hardware, interrupt, device-tree, or
+stream-handshake problem and should be diagnosed rather than hidden by retries.
+
+DSP mode is cleared when triggered ownership is armed and again when the shot
+is accepted. While clear is asserted, the DSP chain masks AXI `TVALID`
+combinationally. This prevents a buffered output from the previous acquisition
+from being accepted on the clock edge that resets the pipeline; every
+triggered capture therefore starts from the configured initial NCO, noise, and
+FIR state.
 
 One observed SG failure accepted the complete Q-Crate frame (`DONE`, no stream
 stalls) but never completed the DMA descriptor. The exported HWH showed
@@ -548,6 +663,19 @@ All seven conditions were accepted on the KV260. The final run passed 100
 independent 4096-word captures, an 8-frame chain ending at `0x00070fff`, a
 64-frame chain ending at `0x003f0fff`, and 100 repeated 8-frame chains without
 timeouts, stale data, loss, duplication, or frame-order errors.
+
+DP-5A is accepted separately when immediate `capture` and `capture-dsp` remain
+passing and `capture-triggered --repeat 10` proves all of the following:
+
+1. DMA and the PL source are armed before R5 starts each sequence.
+2. Exactly one trigger is accepted and no early trigger is silently consumed.
+3. Shot identity increases across sequence executions.
+4. Trigger and first-sample timestamps are valid and ordered.
+5. Every IQ word matches the bit-exact model for every shot.
+6. Failure or process exit leaves neither DMA nor the stream source armed.
+
+These conditions remain pending until the matching bitstream and PetaLinux
+image pass on the KV260.
 
 ## Deferred sustained-acquisition architectures
 

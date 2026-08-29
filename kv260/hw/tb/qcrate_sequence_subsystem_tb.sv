@@ -71,6 +71,7 @@ module qcrate_sequence_subsystem_tb;
     logic done_pulse_stream;
     logic aborted_pulse_stream;
     logic fault_pulse_stream;
+    logic shot_start_pulse_stream;
     logic [7:0] fault_code_stream;
     logic [EVENT_ADDR_WIDTH-1:0] fault_index_stream;
     logic [EVENT_ADDR_WIDTH-1:0] active_index_stream;
@@ -219,6 +220,7 @@ module qcrate_sequence_subsystem_tb;
         .done_pulse_o              (done_pulse_stream),
         .aborted_pulse_o           (aborted_pulse_stream),
         .fault_pulse_o             (fault_pulse_stream),
+        .shot_start_pulse_o        (shot_start_pulse_stream),
         .fault_code_o              (fault_code_stream),
         .fault_event_index_o       (fault_index_stream),
         .active_event_index_o      (active_index_stream),

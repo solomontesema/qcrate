@@ -7,6 +7,7 @@ import errno
 import fcntl
 import mmap
 import os
+import subprocess
 import struct
 import sys
 from dataclasses import dataclass
@@ -18,6 +19,10 @@ ABI_VERSION = 1
 DMA_TRANS_NOERROR = 0
 CAP_SG_CHAIN = 1 << 0
 CAP_DSP_MODE = 1 << 1
+CAP_TRIGGERED = 1 << 2
+
+TRIGGER_SEEN = 1 << 0
+FIRST_SAMPLE_TIME_VALID = 1 << 1
 
 DSP_CONFIG = Path("/usr/share/qcrate/dsp/tone_1mhz.json")
 DSP_TABLE_DIR = Path("/usr/share/qcrate/dsp")
@@ -26,6 +31,8 @@ INFO_STRUCT = struct.Struct("<8I")
 CAPTURE_STRUCT = struct.Struct("<16I")
 CAPS_STRUCT = struct.Struct("<8I")
 CAPTURE_FRAMES_STRUCT = struct.Struct("<16I")
+TRIGGERED_ARM_STRUCT = struct.Struct("<8I")
+TRIGGERED_RESULT_STRUCT = struct.Struct("<14I2Q6I")
 WORD_STRUCT = struct.Struct("<I")
 
 IOC_NRBITS = 8
@@ -54,6 +61,11 @@ IOC_GET_CAPS = ioctl_code(IOC_READ, 0x02, CAPS_STRUCT.size)
 IOC_CAPTURE_FRAMES = ioctl_code(
     IOC_READ | IOC_WRITE, 0x03, CAPTURE_FRAMES_STRUCT.size
 )
+IOC_ARM_TRIGGERED = ioctl_code(IOC_WRITE, 0x04, TRIGGERED_ARM_STRUCT.size)
+IOC_WAIT_TRIGGERED = ioctl_code(
+    IOC_READ | IOC_WRITE, 0x05, TRIGGERED_RESULT_STRUCT.size
+)
+IOC_CANCEL_TRIGGERED = ioctl_code(0, 0x06, 0)
 
 
 @dataclass(frozen=True)
@@ -81,6 +93,10 @@ class DeviceCaps:
     @property
     def has_dsp_mode(self) -> bool:
         return bool(self.feature_flags & CAP_DSP_MODE)
+
+    @property
+    def has_triggered_capture(self) -> bool:
+        return bool(self.feature_flags & CAP_TRIGGERED)
 
 
 @dataclass(frozen=True)
@@ -110,6 +126,25 @@ class CaptureFramesResult:
     current_frame_id: int
     current_sample_index: int
     stall_cycles: int
+
+
+@dataclass(frozen=True)
+class TriggeredResult:
+    timeout_ms: int
+    transferred_bytes: int
+    last_residue_bytes: int
+    dma_result: int
+    stream_status: int
+    completed_frames: int
+    current_frame_id: int
+    current_sample_index: int
+    stall_cycles: int
+    trigger_shot_id: int
+    trigger_count: int
+    missed_trigger_count: int
+    timestamp_flags: int
+    trigger_time: int
+    first_sample_time: int
 
 
 def get_info(fd: int) -> DeviceInfo:
@@ -168,6 +203,37 @@ def request_capture_frames(
     raw = bytearray(CAPTURE_FRAMES_STRUCT.pack(*values))
     fcntl.ioctl(fd, IOC_CAPTURE_FRAMES, raw, True)
     return CaptureFramesResult(*CAPTURE_FRAMES_STRUCT.unpack(raw)[:11])
+
+
+def arm_triggered(
+    fd: int, words: int, frames: int, stream_mode: int = 1
+) -> None:
+    values = [0] * 8
+    values[0] = words
+    values[1] = frames
+    values[2] = stream_mode
+    fcntl.ioctl(fd, IOC_ARM_TRIGGERED, TRIGGERED_ARM_STRUCT.pack(*values))
+
+
+def wait_triggered(fd: int, timeout_ms: int) -> TriggeredResult:
+    values = [0] * 22
+    values[0] = timeout_ms
+    raw = bytearray(TRIGGERED_RESULT_STRUCT.pack(*values))
+    fcntl.ioctl(fd, IOC_WAIT_TRIGGERED, raw, True)
+    unpacked = TRIGGERED_RESULT_STRUCT.unpack(raw)
+    return TriggeredResult(*unpacked[:13], unpacked[14], unpacked[15])
+
+
+def cancel_triggered(fd: int) -> None:
+    try:
+        fcntl.ioctl(fd, IOC_CANCEL_TRIGGERED)
+    except OSError as exc:
+        if exc.errno != errno.EINVAL:
+            raise
+
+
+def require_cancel_triggered(fd: int) -> None:
+    fcntl.ioctl(fd, IOC_CANCEL_TRIGGERED)
 
 
 def verify_pattern(buffer: mmap.mmap, words: int) -> None:
@@ -229,6 +295,10 @@ def print_info(info: DeviceInfo, caps: DeviceCaps) -> None:
     print(f"SG frame chaining  : {'yes' if caps.has_sg_chain else 'no'}")
     print(f"maximum SG frames  : {caps.max_chain_frames}")
     print(f"DSP stream mode    : {'yes' if caps.has_dsp_mode else 'no'}")
+    print(
+        "triggered capture : "
+        f"{'yes' if caps.has_triggered_capture else 'no'}"
+    )
     if info.max_frame_words < 4096:
         print("NOTE: the current 14-bit AXI DMA length field limits frames to 4095 words")
 
@@ -479,6 +549,173 @@ def command_capture_dsp(
         os.close(fd)
 
 
+def run_sequence_command(tool: Path, timeout_ms: int, command: str) -> None:
+    argv = [str(tool), "--timeout-ms", str(timeout_ms), command]
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            timeout=timeout_ms / 1000.0 + 2.0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{' '.join(argv)} exceeded its timeout") from exc
+    if completed.returncode:
+        raise RuntimeError(
+            f"{' '.join(argv)} exited with status {completed.returncode}"
+        )
+
+
+def command_capture_triggered(
+    device: Path,
+    words: int,
+    frames: int,
+    timeout_ms: int,
+    sequence_timeout_ms: int,
+    sequence_tool: Path,
+    repeat: int,
+    output: Path | None,
+) -> None:
+    try:
+        from qcrate_dsp_reference import generate_words
+    except ImportError as exc:
+        raise RuntimeError("installed DSP reference module is unavailable") from exc
+
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        info = get_info(fd)
+        caps = get_caps(fd)
+        if not caps.has_triggered_capture:
+            raise RuntimeError("driver does not advertise triggered capture")
+        if not caps.has_dsp_mode:
+            raise RuntimeError("driver does not advertise DSP stream mode")
+        if words < 1 or words > info.max_frame_words:
+            raise ValueError(
+                f"--words must be between 1 and {info.max_frame_words}, got {words}"
+            )
+        if frames < 1:
+            raise ValueError(f"--frames must be positive, got {frames}")
+        if frames > 1 and not caps.has_sg_chain:
+            raise RuntimeError("multi-frame triggered capture requires SG chaining")
+        max_buffer_frames = info.buffer_bytes // (words * WORD_STRUCT.size)
+        max_frames = min(caps.max_chain_frames, max_buffer_frames)
+        if frames > max_frames:
+            raise ValueError(
+                f"--frames must not exceed {max_frames} for {words} words"
+            )
+        if timeout_ms < 1 or sequence_timeout_ms < 1:
+            raise ValueError("timeouts must be positive")
+        if repeat < 1:
+            raise ValueError(f"--repeat must be positive, got {repeat}")
+
+        total_words = words * frames
+        total_bytes = total_words * WORD_STRUCT.size
+        expected_words = generate_words(DSP_CONFIG, DSP_TABLE_DIR, total_words)
+        with mmap.mmap(
+            fd,
+            info.buffer_bytes,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ,
+        ) as buffer:
+            result = None
+            for iteration in range(1, repeat + 1):
+                run_sequence_command(sequence_tool, sequence_timeout_ms, "arm")
+                armed = False
+                try:
+                    arm_triggered(fd, words, frames, stream_mode=1)
+                    armed = True
+                    run_sequence_command(sequence_tool, sequence_timeout_ms, "start")
+                    result = wait_triggered(fd, timeout_ms)
+                    armed = False
+                finally:
+                    if armed:
+                        cancel_triggered(fd)
+
+                if result.dma_result != DMA_TRANS_NOERROR:
+                    raise RuntimeError(f"DMA result code {result.dma_result}")
+                if result.transferred_bytes != total_bytes:
+                    raise RuntimeError(
+                        f"transferred {result.transferred_bytes} bytes, "
+                        f"expected {total_bytes}"
+                    )
+                if result.last_residue_bytes:
+                    raise RuntimeError(
+                        f"DMA residue is {result.last_residue_bytes} bytes"
+                    )
+                expected_flags = TRIGGER_SEEN | FIRST_SAMPLE_TIME_VALID
+                if result.timestamp_flags != expected_flags:
+                    raise RuntimeError(
+                        f"timestamp flags 0x{result.timestamp_flags:x}, "
+                        f"expected 0x{expected_flags:x}"
+                    )
+                if result.first_sample_time < result.trigger_time:
+                    raise RuntimeError("first sample timestamp precedes trigger")
+                verify_dsp(buffer, expected_words)
+                if repeat > 1:
+                    print(
+                        f"OK  triggered shot {iteration}/{repeat}: "
+                        f"shot_id={result.trigger_shot_id}, "
+                        f"latency={result.first_sample_time - result.trigger_time} ticks"
+                    )
+
+            assert result is not None
+            first = WORD_STRUCT.unpack_from(buffer, 0)[0]
+            last = WORD_STRUCT.unpack_from(buffer, (total_words - 1) * 4)[0]
+            latency = result.first_sample_time - result.trigger_time
+            print(
+                f"PASS {repeat} triggered DSP capture(s), "
+                f"{frames} frame(s) x {words} words; every IQ word matched"
+            )
+            print(f"first/last         : 0x{first:08x} / 0x{last:08x}")
+            print(f"shot ID            : {result.trigger_shot_id}")
+            print(f"trigger time       : {result.trigger_time} ticks")
+            print(f"first sample time  : {result.first_sample_time} ticks")
+            print(f"trigger-to-sample  : {latency} ticks")
+            print(f"trigger count      : {result.trigger_count}")
+            print(f"missed triggers    : {result.missed_trigger_count}")
+            print(f"stall cycles       : {result.stall_cycles}")
+            if output is not None:
+                output.write_bytes(buffer[:total_bytes])
+                print(f"wrote               : {output}")
+    finally:
+        os.close(fd)
+
+
+def command_test_trigger_cancel(device: Path, words: int) -> None:
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        info = get_info(fd)
+        caps = get_caps(fd)
+        if not caps.has_triggered_capture:
+            raise RuntimeError("driver does not advertise triggered capture")
+        if words < 1 or words > info.max_frame_words:
+            raise ValueError(
+                f"--words must be between 1 and {info.max_frame_words}, got {words}"
+            )
+
+        arm_triggered(fd, words, 1, stream_mode=0)
+        require_cancel_triggered(fd)
+
+        with mmap.mmap(
+            fd,
+            info.buffer_bytes,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ,
+        ) as buffer:
+            result = request_capture(fd, words, 1000)
+            if result.dma_result != DMA_TRANS_NOERROR or result.residue_bytes:
+                raise RuntimeError(
+                    f"post-cancel capture failed: DMA={result.dma_result}, "
+                    f"residue={result.residue_bytes}"
+                )
+            verify_pattern(buffer, words)
+        print(
+            f"PASS triggered arm/cancel and immediate recovery; "
+            f"verified {words} words"
+        )
+    finally:
+        os.close(fd)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=Path, default=DEVICE)
@@ -533,6 +770,26 @@ def parse_args() -> argparse.Namespace:
     capture_dsp.add_argument("--timeout-ms", type=int, default=2000)
     capture_dsp.add_argument("--repeat", type=int, default=1)
     capture_dsp.add_argument("--output", type=Path)
+
+    capture_triggered = subparsers.add_parser(
+        "capture-triggered",
+        help="arm DMA, start the R5-owned sequence, and verify timed DSP data",
+    )
+    capture_triggered.add_argument("--words", type=int, default=1024)
+    capture_triggered.add_argument("--frames", type=int, default=4)
+    capture_triggered.add_argument("--timeout-ms", type=int, default=2000)
+    capture_triggered.add_argument("--sequence-timeout-ms", type=int, default=2000)
+    capture_triggered.add_argument(
+        "--sequence-tool", type=Path, default=Path("/usr/bin/qcrate-sequence")
+    )
+    capture_triggered.add_argument("--repeat", type=int, default=1)
+    capture_triggered.add_argument("--output", type=Path)
+
+    cancel_test = subparsers.add_parser(
+        "test-trigger-cancel",
+        help="arm and cancel without a shot, then verify immediate recovery",
+    )
+    cancel_test.add_argument("--words", type=int, default=1024)
     return parser.parse_args()
 
 
@@ -567,6 +824,19 @@ def main() -> int:
                 args.repeat,
                 args.output,
             )
+        elif args.command == "capture-triggered":
+            command_capture_triggered(
+                args.device,
+                args.words,
+                args.frames,
+                args.timeout_ms,
+                args.sequence_timeout_ms,
+                args.sequence_tool,
+                args.repeat,
+                args.output,
+            )
+        elif args.command == "test-trigger-cancel":
+            command_test_trigger_cancel(args.device, args.words)
         else:
             raise AssertionError(args.command)
     except (OSError, RuntimeError, ValueError) as exc:

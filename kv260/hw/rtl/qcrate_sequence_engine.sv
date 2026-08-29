@@ -32,6 +32,7 @@ module qcrate_sequence_engine #(
     output logic                             done_pulse_o,
     output logic                             aborted_pulse_o,
     output logic                             fault_pulse_o,
+    output logic                             shot_start_pulse_o,
     output logic [7:0]                       fault_code_o,
     output logic [EVENT_ADDR_WIDTH-1:0]      fault_event_index_o,
 
@@ -188,11 +189,13 @@ module qcrate_sequence_engine #(
             done_pulse_o <= 1'b0;
             aborted_pulse_o <= 1'b0;
             fault_pulse_o <= 1'b0;
+            shot_start_pulse_o <= 1'b0;
             clear_sequence();
         end else begin
             done_pulse_o <= 1'b0;
             aborted_pulse_o <= 1'b0;
             fault_pulse_o <= 1'b0;
+            shot_start_pulse_o <= 1'b0;
 
             if (soft_reset_i) begin
                 clear_sequence();
@@ -299,6 +302,7 @@ module qcrate_sequence_engine #(
                             (external_trigger_enable_i && external_trigger_i)) begin
                             start_time_o <= timebase_i;
                             elapsed_tick_o <= '0;
+                            shot_start_pulse_o <= 1'b1;
                             state_q <= STATE_RUN;
                         end
                     end

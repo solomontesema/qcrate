@@ -11,6 +11,7 @@ module qcrate_command_cdc (
     input  wire logic        continuous_i,
 
     input  wire logic        start_cmd_i,
+    input  wire logic        arm_triggered_cmd_i,
     input  wire logic        abort_cmd_i,
     input  wire logic        soft_reset_cmd_i,
     output logic             command_busy_o,
@@ -24,6 +25,7 @@ module qcrate_command_cdc (
     output logic             active_continuous_o,
 
     output logic             start_pulse_o,
+    output logic             arm_triggered_pulse_o,
     output logic             abort_pulse_o,
     output logic             soft_reset_pulse_o
 );
@@ -33,6 +35,7 @@ module qcrate_command_cdc (
     logic [31:0] mailbox_stream_mode_ctrl;
     logic        mailbox_continuous_ctrl;
     logic        mailbox_start_ctrl;
+    logic        mailbox_arm_triggered_ctrl;
     logic        mailbox_abort_ctrl;
     logic        mailbox_soft_reset_ctrl;
 
@@ -44,7 +47,8 @@ module qcrate_command_cdc (
     logic        command_fire_ctrl;
 
     assign command_busy_o = req_toggle_ctrl ^ ack_toggle_ctrl_sync;
-    assign command_fire_ctrl = (start_cmd_i || abort_cmd_i || soft_reset_cmd_i) &&
+    assign command_fire_ctrl = (start_cmd_i || arm_triggered_cmd_i ||
+                                abort_cmd_i || soft_reset_cmd_i) &&
                                !command_busy_o;
 
     always_ff @(posedge ctrl_clk_i) begin
@@ -54,6 +58,7 @@ module qcrate_command_cdc (
             mailbox_stream_mode_ctrl <= 32'h0000_0000;
             mailbox_continuous_ctrl <= 1'b0;
             mailbox_start_ctrl <= 1'b0;
+            mailbox_arm_triggered_ctrl <= 1'b0;
             mailbox_abort_ctrl <= 1'b0;
             mailbox_soft_reset_ctrl <= 1'b0;
             req_toggle_ctrl <= 1'b0;
@@ -63,6 +68,7 @@ module qcrate_command_cdc (
             mailbox_stream_mode_ctrl <= stream_mode_i;
             mailbox_continuous_ctrl <= continuous_i;
             mailbox_start_ctrl <= start_cmd_i;
+            mailbox_arm_triggered_ctrl <= arm_triggered_cmd_i;
             mailbox_abort_ctrl <= abort_cmd_i;
             mailbox_soft_reset_ctrl <= soft_reset_cmd_i;
             req_toggle_ctrl <= ~req_toggle_ctrl;
@@ -92,12 +98,14 @@ module qcrate_command_cdc (
             active_stream_mode_o <= 32'h0000_0000;
             active_continuous_o <= 1'b0;
             start_pulse_o <= 1'b0;
+            arm_triggered_pulse_o <= 1'b0;
             abort_pulse_o <= 1'b0;
             soft_reset_pulse_o <= 1'b0;
             req_toggle_stream_seen <= 1'b0;
             ack_toggle_stream <= 1'b0;
         end else begin
             start_pulse_o <= 1'b0;
+            arm_triggered_pulse_o <= 1'b0;
             abort_pulse_o <= 1'b0;
             soft_reset_pulse_o <= 1'b0;
 
@@ -107,6 +115,7 @@ module qcrate_command_cdc (
                 active_stream_mode_o <= mailbox_stream_mode_ctrl;
                 active_continuous_o <= mailbox_continuous_ctrl;
                 start_pulse_o <= mailbox_start_ctrl;
+                arm_triggered_pulse_o <= mailbox_arm_triggered_ctrl;
                 abort_pulse_o <= mailbox_abort_ctrl;
                 soft_reset_pulse_o <= mailbox_soft_reset_ctrl;
                 req_toggle_stream_seen <= req_toggle_stream_sync;
