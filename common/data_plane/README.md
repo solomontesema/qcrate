@@ -74,7 +74,9 @@ run.
 A `DATA` packet belongs to one frame and must not cross a frame boundary.
 `FRAME_START` requires `sample_offset == 0`; `FRAME_END` marks the packet
 containing that frame's final sample. Gaps in either packet sequence or sample
-offset are observable discontinuities.
+offset are observable discontinuities. For one shot, packet-sequence order
+must also follow increasing frame and sample order; network arrival order need
+not do so.
 
 `STREAM_INFO` and `DATA` carry the stream's registered format and sample
 width. `SHOT_END` and `HEARTBEAT` use format `NONE` and a zero sample width.
@@ -214,6 +216,8 @@ These rules keep accidental ABI drift visible in tests and packet recordings.
 - `qcrate_data_protocol.h` and `.c`: portable C constants and explicit codecs
   for the future KV260 sender.
 - `host/data_plane/qcrate_data_protocol.py`: Python codec for host tooling.
+- `host/data_plane/qcrate_receiver.py`: finite-shot receiver, packet journal,
+  integrity analysis, and deterministic replay.
 - `tests/`: C/Python round-trip, malformed-input, and shared golden-vector
   tests.
 
