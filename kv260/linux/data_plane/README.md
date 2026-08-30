@@ -2,27 +2,31 @@
 
 ## Objective And Status
 
-This milestone connects the accepted finite scatter-gather DMA path to the
-Q-Crate Data Plane v1 network protocol. One compiled A53 Linux process owns the
-complete operation:
+This subsystem connects the accepted scatter-gather DMA path to the Q-Crate
+Data Plane v1 network protocol. The default finite-shot path is accepted on
+KV260. DP-5C1 adds a sustained triggered mode in which one compiled A53 Linux
+process owns DMA, R5 RPMsg control, the coherent mapping, and UDP:
 
 ```text
 qcrate_stream_engine / DSP
         |
         v
-AXI DMA S2MM finite SG chain
+AXI DMA S2MM bank pool
         |
         v
 qcrate_dma coherent mmap (read-only userspace view)
         |
-        v
-shared C packetizer -> paced UDP sendmsg() -> host receiver
+        +--> acquisition thread --> bounded ownership-token queue
+                                      |
+                                      v
+             sender thread --> shared C packetizer --> UDP sendmsg()
 ```
 
-Implementation, PetaLinux integration, and KV260-to-host acceptance are
-complete. This is still a finite-shot sender: DMA completes before packet
-transmission starts. It is the permanent triggered-acquisition and regression
-path, not a claim of continuous real-time streaming.
+The no-option behavior remains the permanent one-shot regression: DMA finishes
+before transmission starts. `--triggered-shots N` selects DP-5C1 and overlaps
+acquisition of later banks with transmission of earlier banks. DP-5C1 is
+implemented and host-compiled; its KV260 acceptance is documented below and
+must pass before this status is promoted to accepted.
 
 ## Ownership Model
 
@@ -33,6 +37,10 @@ memory. Responsibilities remain separated:
 |---|---|
 | `xilinx_dma` | DMA channel, descriptors, interrupt, and reset |
 | `qcrate_dma` | exclusive open, stream control, finite SG chain, coherent buffer, timeout |
+| R5 FreeRTOS | validates, arms, and starts each committed pulse sequence through RPMsg |
+| acquisition thread | R5 command order, blocking bank dequeue, evidence validation |
+| bounded SPSC queue | transfers ownership tokens only; never copies samples |
+| sender thread | direct mmap packetization, monotonically increasing sequence, exact release |
 | shared C packetizer | metadata, packet sequence, frame chunks, flags, CRC, termination |
 | `qcrate-streamer` | capture request, read-only mmap, connected UDP socket, pacing |
 | host receiver | immutable journal, reassembly, continuity audit, sample publication |
@@ -43,6 +51,32 @@ uses two `sendmsg()` iovecs: a 64-byte encoded header and a direct slice of the
 coherent mmap. The kernel still copies normal UDP data into its socket buffer;
 the design avoids an additional userspace packet-payload copy without claiming
 Linux `MSG_ZEROCOPY` support.
+
+## Sustained Triggered Ownership
+
+Triggered mode uses the DP-5B invariant without weakening it:
+
+```text
+FREE -> FILLING -> READY -> USER_OWNED -> FREE
+```
+
+The acquisition thread may enqueue only a token returned by `POOL_DEQUEUE`.
+The sender may read only the token's validated mmap extent and returns the bank
+only after all of that shot's datagrams have been accepted by `sendmsg()`. A
+network, RPMsg, DMA, protocol, or stale-token error fails the whole run; unread
+measurement data is never silently overwritten or declared transmitted.
+
+The queue capacity equals the configured bank count and contains fixed-size
+DMA UAPI records, not payload bytes. The driver can therefore fill one bank
+while userspace transmits another, but backpressure remains bounded and
+observable through pool starvation and queue counters.
+
+One random nonzero Data Plane run ID is generated per process. Hardware
+`trigger_shot_id` values identify shots, and packet sequence numbers increase
+across all shots in the run. Every `SHOT_END` closes one measurement without
+ending the run. After the final bank has been returned successfully, a
+zero-payload heartbeat sets `END_OF_STREAM`; a release or send failure therefore
+cannot masquerade as a cleanly closed lifecycle.
 
 ## Finite Shot
 
@@ -80,9 +114,11 @@ The packet metadata is centralized in
 - DSP mode identifies the tracked 200 MHz synthetic-ADC/DDC/FIR configuration;
 - counter mode describes the 200 MHz frame/sample test pattern;
 - both use the shared 200 MHz Q-Crate timebase as their timestamp clock;
-- every data header currently carries timestamp zero with
-  `TIMESTAMP_VALID` clear because the DMA ABI does not capture the exact first
-  sample time.
+- the one-shot compatibility path carries timestamp zero with
+  `TIMESTAMP_VALID` clear;
+- triggered pool mode places the DMA-captured `first_sample_time` in the first
+  DATA packet and sets `TIMESTAMP_VALID` only there. Later packet timestamps
+  remain invalid rather than manufacturing sub-shot precision.
 
 The DSP `config_id` is the first 64 bits of SHA-256 over the canonical DSP JSON
 followed by the table manifest. A focused test fails if either source changes
@@ -117,7 +153,10 @@ common/data_plane/qcrate_stream_profiles.h
     Counter and DSP metadata contracts.
 
 kv260/linux/data_plane/qcrate_streamer.c
-    DMA and UDP platform adapter.
+    One-shot adapter and sustained acquisition/sender pipeline.
+
+kv260/linux/openamp/qcrate_rpmsg_client.[ch]
+    Reusable validated Linux RPMsg transport shared with qcrate-control.
 
 recipes-apps/qcrate-streamer/qcrate-streamer.bb
     Cross-compiles and installs /usr/bin/qcrate-streamer.
@@ -155,13 +194,21 @@ It does not access the DMA device or start AMD tools.
 
 ## PetaLinux Build And Deployment
 
-No Vivado rebuild is needed because DP-3 does not change hardware or device
-tree. Build the new recipe first:
+No Vivado rebuild is needed because DP-5C1 changes neither hardware nor device
+tree. Stage the existing R5 ELF plus canonical Linux client sources; `stage`
+does not rebuild the Vitis platform:
+
+```bash
+python3 kv260/vitis/vitis_flow.py stage
+```
+
+Build the two affected applications:
 
 ```bash
 source /tools/Xilinx/PetaLinux/2024.2/settings.sh
 cd /tools/fpga_projects/qcrate/kv260/linux/petalinux/qcrate-kv260
 petalinux-build -c qcrate-streamer
+petalinux-build -c qcrate-openamp
 ```
 
 Expected result: the recipe compiles with no warnings promoted to errors and
@@ -251,6 +298,69 @@ python3 host/dsp_model/qcrate_capture_viewer.py \
 
 Expected result: zero model mismatches and the same approximately 1 MHz complex
 tone accepted during DSP-2B DMA testing.
+
+### DP-5C1 Sustained Sender
+
+The compiled host recorder is DP-5C2. Until it is available, use one process to
+own the UDP port and another to capture the exact datagram count. `tcpdump`
+observes traffic but does not bind the port; running it alone makes the host
+return ICMP port-unreachable messages to the sender's connected UDP socket.
+
+In the first host terminal, bind a discard sink for the complete run:
+
+```bash
+socat -u UDP4-RECV:47000,bind=192.168.1.92,reuseaddr /dev/null
+```
+
+In a second host terminal, replace the interface if necessary and start packet
+capture. Remove a previous capture first, or deliberately retain it and use the
+per-source-port audit below:
+
+```bash
+rm -f build/data_plane/dp5c1-100-shots.pcap
+sudo tcpdump -ni enp3s0f1 udp port 47000 \
+  -w build/data_plane/dp5c1-100-shots.pcap
+```
+
+On KV260, load the committed sequence table once, then request 100 overlapping
+shots:
+
+```bash
+sudo qcrate-sequence load ~/qcrate/two_channel_demo.qseq
+sudo qcrate-streamer \
+  --destination 192.168.1.92 \
+  --triggered-shots 100 \
+  --banks 4
+```
+
+Stop both host processes after the sender exits and count the captured packets:
+
+```bash
+tcpdump -nn -r build/data_plane/dp5c1-100-shots.pcap 2>/dev/null | wc -l
+```
+
+Every new sender socket chooses a new ephemeral source port. If one capture
+contains retries, count each socket lifecycle separately:
+
+```bash
+tcpdump -nn -r build/data_plane/dp5c1-100-shots.pcap 2>/dev/null |
+  awk '/47000:/ {split($3, part, "."); print part[length(part)]}' |
+  sort | uniq -c
+```
+
+With the default four-frame profile, acceptance requires:
+
+- `shots acquired/sent: 100 / 100`;
+- 1,638,400 sample-payload bytes;
+- packet sequence `0..1800` and exactly 1801 captured datagrams (18 per shot
+  plus one terminal heartbeat);
+- nonzero, increasing hardware shot IDs and first-sample timestamps;
+- separate token-queue and DMA READY-queue high-water values;
+- zero pool starvation and skipped triggers;
+- no DMA, RCU-stall, remoteproc, or RPMsg errors in `dmesg`.
+
+Finally rerun the one-shot receiver procedure above. It proves that adding the
+sustained mode did not change the already accepted compatibility path.
 
 ## Accepted Result
 

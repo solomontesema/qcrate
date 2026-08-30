@@ -11,6 +11,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 COMMON = ROOT / "common" / "data_plane"
+PROTOCOL = ROOT / "common" / "protocol"
+OPENAMP = ROOT / "kv260" / "linux" / "openamp"
 
 
 def main() -> int:
@@ -65,9 +67,13 @@ def main() -> int:
                 "-Werror",
                 f"-I{COMMON}",
                 f"-I{ROOT / 'common' / 'dma'}",
+                f"-I{PROTOCOL}",
+                f"-I{OPENAMP}",
                 str(ROOT / "kv260" / "linux" / "data_plane" / "qcrate_streamer.c"),
                 str(COMMON / "qcrate_data_protocol.c"),
                 str(COMMON / "qcrate_data_packetizer.c"),
+                str(OPENAMP / "qcrate_rpmsg_client.c"),
+                "-pthread",
                 "-o",
                 str(streamer),
             ],
@@ -79,6 +85,24 @@ def main() -> int:
             check=True,
             cwd=ROOT,
             stdout=subprocess.DEVNULL,
+        )
+        control = Path(temporary) / "qcrate-control"
+        subprocess.run(
+            [
+                compiler,
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                f"-I{PROTOCOL}",
+                f"-I{OPENAMP}",
+                str(OPENAMP / "qcrate_control.c"),
+                str(OPENAMP / "qcrate_rpmsg_client.c"),
+                "-o",
+                str(control),
+            ],
+            check=True,
+            cwd=ROOT,
         )
     subprocess.run(
         [

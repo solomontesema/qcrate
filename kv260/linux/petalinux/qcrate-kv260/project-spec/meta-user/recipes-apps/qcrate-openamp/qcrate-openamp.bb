@@ -10,6 +10,8 @@ INHIBIT_PACKAGE_STRIP = "1"
 
 SRC_URI = "file://qcrate_control.c \
            file://qcrate_protocol.h \
+           file://qcrate_rpmsg_client.c \
+           file://qcrate_rpmsg_client.h \
            file://qcrate-r5.elf \
            file://qcrate-r5-remoteproc \
            file://qcrate-r5.service \
@@ -32,6 +34,7 @@ SYSTEMD_AUTO_ENABLE:${PN} = "enable"
 do_compile() {
     ${CC} ${CFLAGS} ${CPPFLAGS} -Wall -Wextra -Werror \
         -I${WORKDIR} ${WORKDIR}/qcrate_control.c \
+        ${WORKDIR}/qcrate_rpmsg_client.c \
         -o qcrate-control ${LDFLAGS}
 }
 

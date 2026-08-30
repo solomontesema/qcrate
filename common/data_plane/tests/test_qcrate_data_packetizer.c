@@ -68,6 +68,9 @@ int main(void)
 		.fraction_bits = 15,
 		.timestamp_clock_id = QCRATE_DATA_CLOCK_QCRATE_TIMEBASE,
 		.config_id = UINT64_C(0x0fd399e017ecb182),
+		.first_sample_timestamp = UINT64_C(0x123456789abcdef0),
+		.first_sample_timestamp_valid = true,
+		.end_of_stream = true,
 	};
 	struct qcrate_data_packetizer_result result;
 	struct qcrate_data_shot_end end;
@@ -97,6 +100,13 @@ int main(void)
 		return fail("frame packet splitting is incorrect");
 	if (!(observer.packets[1].header.flags &
 	      QCRATE_DATA_FLAG_FRAME_START) ||
+	    !(observer.packets[1].header.flags &
+	      QCRATE_DATA_FLAG_TIMESTAMP_VALID) ||
+	    observer.packets[1].header.timestamp_ticks !=
+	      config.first_sample_timestamp ||
+	    (observer.packets[2].header.flags &
+	      QCRATE_DATA_FLAG_TIMESTAMP_VALID) ||
+	    observer.packets[2].header.timestamp_ticks != 0 ||
 	    !(observer.packets[2].header.flags &
 	      QCRATE_DATA_FLAG_FRAME_END) ||
 	    observer.packets[3].header.frame_id != 1)
@@ -110,6 +120,39 @@ int main(void)
 	    end.payload_crc32 != result.payload_crc32 ||
 	    result.payload_crc32 != UINT32_C(0xbcde9e18))
 		return fail("SHOT_END totals are incorrect");
+	if (!(end.end_flags & QCRATE_DATA_FLAG_END_OF_STREAM) ||
+	    !(end.end_flags & QCRATE_DATA_FLAG_PAYLOAD_CRC_VALID))
+		return fail("terminal SHOT_END flags are incorrect");
+
+	config.initial_sequence = result.next_sequence;
+	config.shot_id++;
+	config.first_sample_timestamp_valid = false;
+	config.end_of_stream = false;
+	observer = (struct observer) {.fail_at = -1};
+	status = qcrate_data_packetize(&config, samples, sizeof(samples),
+				       observe, &observer, &result);
+	if (status != QCRATE_DATA_PACKETIZER_OK ||
+	    observer.packets[0].header.packet_sequence != 16 ||
+	    observer.packets[0].header.shot_id != 10 ||
+	    observer.packets[1].header.timestamp_ticks != 0 ||
+	    (observer.packets[1].header.flags &
+	     QCRATE_DATA_FLAG_TIMESTAMP_VALID))
+		return fail("chained shot identity or timestamp is incorrect");
+	if (qcrate_data_shot_end_decode(
+			&end, observer.packets[5].payload,
+			observer.packets[5].payload_bytes) != QCRATE_DATA_CODEC_OK ||
+	    (end.end_flags & QCRATE_DATA_FLAG_END_OF_STREAM))
+		return fail("intermediate SHOT_END was marked end-of-stream");
+	status = qcrate_data_emit_end_of_stream(
+		config.stream_id, config.run_id, config.shot_id,
+		result.next_sequence, observe, &observer, &result.next_sequence);
+	if (status != QCRATE_DATA_PACKETIZER_OK || observer.count != 7 ||
+	    observer.packets[6].header.packet_type !=
+		QCRATE_DATA_PACKET_HEARTBEAT ||
+	    !(observer.packets[6].header.flags &
+	      QCRATE_DATA_FLAG_END_OF_STREAM) ||
+	    observer.packets[6].payload_bytes != 0 || result.next_sequence != 23)
+		return fail("terminal lifecycle heartbeat is incorrect");
 
 	observer = (struct observer) {.fail_at = 2};
 	status = qcrate_data_packetize(&config, samples, sizeof(samples),

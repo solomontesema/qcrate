@@ -7,23 +7,14 @@
  * every response header before interpreting the payload.
  */
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
-#include <poll.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <time.h>
-#include <unistd.h>
+#include "qcrate_rpmsg_client.h"
 
-#include "qcrate_protocol.h"
-
-#define QCRATE_SYSFS_RPMSG_CLASS "/sys/class/rpmsg"
 #define QCRATE_DEFAULT_TIMEOUT_MS 2000
 #define QCRATE_DEVICE_ID_VALUE    UINT32_C(0x51435254)
 
@@ -41,67 +32,6 @@ static void usage(FILE *stream, const char *program)
 		program);
 }
 
-static int read_text_file(const char *path, char *buffer, size_t capacity)
-{
-	FILE *file;
-	size_t length;
-
-	file = fopen(path, "r");
-	if (file == NULL)
-		return -1;
-
-	if (fgets(buffer, (int)capacity, file) == NULL) {
-		fclose(file);
-		return -1;
-	}
-	fclose(file);
-
-	length = strlen(buffer);
-	while (length > 0U &&
-	       (buffer[length - 1U] == '\n' || buffer[length - 1U] == '\r'))
-		buffer[--length] = '\0';
-	return 0;
-}
-
-static int discover_endpoint(char *device_path, size_t capacity)
-{
-	struct dirent *entry;
-	DIR *directory;
-	char name_path[512];
-	char service_name[64];
-
-	directory = opendir(QCRATE_SYSFS_RPMSG_CLASS);
-	if (directory == NULL)
-		return -1;
-
-	while ((entry = readdir(directory)) != NULL) {
-		if (strncmp(entry->d_name, "rpmsg", 5U) != 0)
-			continue;
-		if (snprintf(name_path, sizeof(name_path), "%s/%s/name",
-			     QCRATE_SYSFS_RPMSG_CLASS, entry->d_name) >=
-		    (int)sizeof(name_path))
-			continue;
-		if (read_text_file(name_path, service_name,
-				   sizeof(service_name)) != 0)
-			continue;
-		if (strcmp(service_name, QCRATE_RPMSG_SERVICE_NAME) != 0)
-			continue;
-
-		if (snprintf(device_path, capacity, "/dev/%s", entry->d_name) >=
-		    (int)capacity) {
-			closedir(directory);
-			errno = ENAMETOOLONG;
-			return -1;
-		}
-		closedir(directory);
-		return 0;
-	}
-
-	closedir(directory);
-	errno = ENODEV;
-	return -1;
-}
-
 static int parse_u32(const char *text, uint32_t *value)
 {
 	char *end;
@@ -115,97 +45,42 @@ static int parse_u32(const char *text, uint32_t *value)
 	return 0;
 }
 
-static uint32_t next_transaction_id(void)
-{
-	struct timespec now;
-	uint32_t value;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-		return (uint32_t)getpid();
-	value = (uint32_t)now.tv_nsec ^ (uint32_t)now.tv_sec;
-	return value ^ (uint32_t)getpid();
-}
-
-static int exchange_message(int file_descriptor, int timeout_ms,
+static int exchange_message(struct qcrate_rpmsg_client *client,
 			    struct qcrate_rpmsg_message *message)
 {
 	struct qcrate_rpmsg_message response;
-	struct pollfd poll_descriptor;
-	ssize_t count;
+	int result;
 
-	count = write(file_descriptor, message, sizeof(*message));
-	if (count != (ssize_t)sizeof(*message)) {
-		if (count >= 0)
-			errno = EIO;
-		perror("qcrate-control: RPMsg write");
-		return -1;
-	}
-
-	poll_descriptor.fd = file_descriptor;
-	poll_descriptor.events = POLLIN;
-	poll_descriptor.revents = 0;
-	count = poll(&poll_descriptor, 1U, timeout_ms);
-	if (count == 0) {
-		fprintf(stderr, "qcrate-control: response timed out after %d ms\n",
-			timeout_ms);
-		return -1;
-	}
-	if (count < 0) {
-		perror("qcrate-control: poll");
-		return -1;
-	}
-	if ((poll_descriptor.revents & POLLIN) == 0) {
-		fprintf(stderr, "qcrate-control: endpoint poll error 0x%x\n",
-			poll_descriptor.revents);
-		return -1;
-	}
-
-	count = read(file_descriptor, &response, sizeof(response));
-	if (count != (ssize_t)sizeof(response)) {
-		if (count < 0)
-			perror("qcrate-control: RPMsg read");
-		else
-			fprintf(stderr,
-				"qcrate-control: short response (%zd, expected %zu)\n",
-				count, sizeof(response));
-		return -1;
-	}
-
-	if (response.magic != QCRATE_RPMSG_MAGIC ||
-	    response.abi_version != QCRATE_RPMSG_ABI_VERSION ||
-	    response.command != message->command ||
-	    response.transaction_id != message->transaction_id ||
-	    response.payload_words > QCRATE_RPMSG_PAYLOAD_WORDS) {
-		fprintf(stderr, "qcrate-control: invalid response header\n");
-		return -1;
-	}
-
-	*message = response;
-	if (message->status != QCRATE_STATUS_OK) {
+	result = qcrate_rpmsg_client_exchange(client, message->command,
+		message->payload, message->payload_words, &response);
+	if (result && errno == EREMOTEIO) {
 		fprintf(stderr, "qcrate-control: R5 service status %" PRId32 "\n",
-			message->status);
+			response.status);
 		return -1;
 	}
+	if (result) {
+		fprintf(stderr, "qcrate-control: RPMsg exchange failed: %s\n",
+			strerror(errno));
+		return -1;
+	}
+	*message = response;
 	return 0;
 }
 
 static void init_request(struct qcrate_rpmsg_message *message, uint16_t command)
 {
 	memset(message, 0, sizeof(*message));
-	message->magic = QCRATE_RPMSG_MAGIC;
-	message->abi_version = QCRATE_RPMSG_ABI_VERSION;
 	message->command = command;
-	message->transaction_id = next_transaction_id();
 }
 
-static int run_ping(int file_descriptor, int timeout_ms, uint32_t nonce)
+static int run_ping(struct qcrate_rpmsg_client *client, uint32_t nonce)
 {
 	struct qcrate_rpmsg_message message;
 
 	init_request(&message, QCRATE_CMD_PING);
 	message.payload_words = 1U;
 	message.payload[0] = nonce;
-	if (exchange_message(file_descriptor, timeout_ms, &message) != 0)
+	if (exchange_message(client, &message) != 0)
 		return -1;
 	if (message.payload_words != 1U || message.payload[0] != nonce) {
 		fprintf(stderr, "qcrate-control: ping payload mismatch\n");
@@ -215,12 +90,12 @@ static int run_ping(int file_descriptor, int timeout_ms, uint32_t nonce)
 	return 0;
 }
 
-static int run_info(int file_descriptor, int timeout_ms)
+static int run_info(struct qcrate_rpmsg_client *client)
 {
 	struct qcrate_rpmsg_message message;
 
 	init_request(&message, QCRATE_CMD_GET_INFO);
-	if (exchange_message(file_descriptor, timeout_ms, &message) != 0)
+	if (exchange_message(client, &message) != 0)
 		return -1;
 	if (message.payload_words != 6U ||
 	    message.payload[0] != QCRATE_DEVICE_ID_VALUE) {
@@ -238,14 +113,14 @@ static int run_info(int file_descriptor, int timeout_ms)
 	return 0;
 }
 
-static int run_scratch_test(int file_descriptor, int timeout_ms, uint32_t value)
+static int run_scratch_test(struct qcrate_rpmsg_client *client, uint32_t value)
 {
 	struct qcrate_rpmsg_message message;
 
 	init_request(&message, QCRATE_CMD_SCRATCH_TEST);
 	message.payload_words = 1U;
 	message.payload[0] = value;
-	if (exchange_message(file_descriptor, timeout_ms, &message) != 0)
+	if (exchange_message(client, &message) != 0)
 		return -1;
 	if (message.payload_words != 5U || message.payload[1] != value ||
 	    message.payload[2] != value || message.payload[3] != message.payload[0] ||
@@ -260,13 +135,13 @@ static int run_scratch_test(int file_descriptor, int timeout_ms, uint32_t value)
 	return 0;
 }
 
-static int run_stats(int file_descriptor, int timeout_ms)
+static int run_stats(struct qcrate_rpmsg_client *client)
 {
 	struct qcrate_rpmsg_message message;
 	uint64_t uptime_ms;
 
 	init_request(&message, QCRATE_CMD_GET_R5_STATS);
-	if (exchange_message(file_descriptor, timeout_ms, &message) != 0)
+	if (exchange_message(client, &message) != 0)
 		return -1;
 	if (message.payload_words != 4U || message.payload[1] == 0U) {
 		fprintf(stderr, "qcrate-control: invalid R5 statistics response\n");
@@ -288,10 +163,9 @@ int main(int argc, char **argv)
 {
 	const char *device = NULL;
 	const char *command;
-	char discovered_device[64];
+	struct qcrate_rpmsg_client client;
 	uint32_t argument;
 	int timeout_ms = QCRATE_DEFAULT_TIMEOUT_MS;
-	int file_descriptor;
 	int index = 1;
 	int status = 0;
 
@@ -321,21 +195,9 @@ int main(int argc, char **argv)
 	}
 	command = argv[index++];
 
-	if (device == NULL) {
-		if (discover_endpoint(discovered_device,
-				      sizeof(discovered_device)) != 0) {
-			fprintf(stderr,
-				"qcrate-control: %s endpoint is unavailable: %s\n",
-				QCRATE_RPMSG_SERVICE_NAME, strerror(errno));
-			return EXIT_FAILURE;
-		}
-		device = discovered_device;
-	}
-
-	file_descriptor = open(device, O_RDWR | O_CLOEXEC);
-	if (file_descriptor < 0) {
-		fprintf(stderr, "qcrate-control: cannot open %s: %s\n",
-			device, strerror(errno));
+	if (qcrate_rpmsg_client_open(&client, device, timeout_ms)) {
+		fprintf(stderr, "qcrate-control: %s endpoint is unavailable: %s\n",
+			QCRATE_RPMSG_SERVICE_NAME, strerror(errno));
 		return EXIT_FAILURE;
 	}
 
@@ -346,11 +208,11 @@ int main(int argc, char **argv)
 		else if (index != argc)
 			status = -1;
 		else
-			status = run_ping(file_descriptor, timeout_ms, argument);
+			status = run_ping(&client, argument);
 	} else if (strcmp(command, "info") == 0 && index == argc) {
-		status = run_info(file_descriptor, timeout_ms);
+		status = run_info(&client);
 	} else if (strcmp(command, "stats") == 0 && index == argc) {
-		status = run_stats(file_descriptor, timeout_ms);
+		status = run_stats(&client);
 	} else if (strcmp(command, "scratch-test") == 0) {
 		argument = UINT32_C(0xA5A55A5A);
 		if (index < argc && parse_u32(argv[index++], &argument) != 0)
@@ -358,14 +220,12 @@ int main(int argc, char **argv)
 		else if (index != argc)
 			status = -1;
 		else
-			status = run_scratch_test(file_descriptor, timeout_ms, argument);
+			status = run_scratch_test(&client, argument);
 	} else if (strcmp(command, "test") == 0 && index == argc) {
-		if (run_ping(file_descriptor, timeout_ms,
-			     UINT32_C(0x51435250)) != 0 ||
-		    run_info(file_descriptor, timeout_ms) != 0 ||
-		    run_scratch_test(file_descriptor, timeout_ms,
-				     UINT32_C(0xA5A55A5A)) != 0 ||
-		    run_stats(file_descriptor, timeout_ms) != 0)
+		if (run_ping(&client, UINT32_C(0x51435250)) != 0 ||
+		    run_info(&client) != 0 ||
+		    run_scratch_test(&client, UINT32_C(0xA5A55A5A)) != 0 ||
+		    run_stats(&client) != 0)
 			status = -1;
 		else
 			printf("PASS Q-Crate OpenAMP vertical slice\n");
@@ -373,7 +233,7 @@ int main(int argc, char **argv)
 		status = -1;
 	}
 
-	close(file_descriptor);
+	qcrate_rpmsg_client_close(&client);
 	if (status != 0) {
 		usage(stderr, argv[0]);
 		return EXIT_FAILURE;

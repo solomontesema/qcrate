@@ -101,6 +101,14 @@ def stage_recipe_inputs() -> None:
             REPO_ROOT / "common" / "protocol" / "qcrate_protocol.h",
             RECIPE_FILES / "qcrate_protocol.h",
         ),
+        (
+            REPO_ROOT / "kv260" / "linux" / "openamp" / "qcrate_rpmsg_client.c",
+            RECIPE_FILES / "qcrate_rpmsg_client.c",
+        ),
+        (
+            REPO_ROOT / "kv260" / "linux" / "openamp" / "qcrate_rpmsg_client.h",
+            RECIPE_FILES / "qcrate_rpmsg_client.h",
+        ),
     )
     for source, destination in copies:
         shutil.copy2(source, destination)

@@ -130,6 +130,7 @@ int qcrate_data_packetize(
 
 		while (offset < config->frame_samples) {
 			uint32_t count = config->frame_samples - offset;
+			bool first_sample = frame == 0 && offset == 0;
 			const uint8_t *payload;
 			size_t bytes;
 
@@ -142,7 +143,10 @@ int qcrate_data_packetize(
 				.header_bytes = QCRATE_DATA_HEADER_BYTES,
 				.packet_type = QCRATE_DATA_PACKET_DATA,
 				.payload_format = config->payload_format,
-				.flags = (offset == 0 ?
+				.flags = (first_sample &&
+					  config->first_sample_timestamp_valid ?
+					 QCRATE_DATA_FLAG_TIMESTAMP_VALID : 0) |
+					(offset == 0 ?
 					 QCRATE_DATA_FLAG_FRAME_START : 0) |
 					(offset + count == config->frame_samples ?
 					 QCRATE_DATA_FLAG_FRAME_END : 0),
@@ -154,6 +158,9 @@ int qcrate_data_packetize(
 				.sample_offset = offset,
 				.sample_count = (uint16_t)count,
 				.sample_bytes = config->sample_bytes,
+				.timestamp_ticks = first_sample &&
+					config->first_sample_timestamp_valid ?
+					config->first_sample_timestamp : 0,
 			};
 			status = emit_object(&header, payload, bytes,
 					     emit, emit_context);
@@ -169,8 +176,9 @@ int qcrate_data_packetize(
 
 	shot_end = (struct qcrate_data_shot_end) {
 		.status = QCRATE_DATA_SHOT_COMPLETE,
-		.end_flags = QCRATE_DATA_FLAG_END_OF_STREAM |
-			QCRATE_DATA_FLAG_PAYLOAD_CRC_VALID,
+		.end_flags = QCRATE_DATA_FLAG_PAYLOAD_CRC_VALID |
+			(config->end_of_stream ?
+			 QCRATE_DATA_FLAG_END_OF_STREAM : 0),
 		.total_frames = config->frame_count,
 		.total_samples = total_samples,
 		.total_data_packets = result->data_packets,
@@ -199,5 +207,37 @@ int qcrate_data_packetize(
 	result->next_sequence = sequence;
 	result->total_samples = total_samples;
 	result->payload_bytes = payload_bytes;
+	return QCRATE_DATA_PACKETIZER_OK;
+}
+
+int qcrate_data_emit_end_of_stream(
+	uint32_t stream_id,
+	uint64_t run_id,
+	uint64_t last_shot_id,
+	uint64_t packet_sequence,
+	qcrate_data_emit_fn emit,
+	void *emit_context,
+	uint64_t *next_sequence)
+{
+	struct qcrate_data_header header = {
+		.header_bytes = QCRATE_DATA_HEADER_BYTES,
+		.packet_type = QCRATE_DATA_PACKET_HEARTBEAT,
+		.payload_format = QCRATE_DATA_FORMAT_NONE,
+		.flags = QCRATE_DATA_FLAG_END_OF_STREAM,
+		.stream_id = stream_id,
+		.run_id = run_id,
+		.shot_id = last_shot_id,
+		.packet_sequence = packet_sequence,
+	};
+	int status;
+
+	if (!stream_id || !run_id || !last_shot_id || !emit || !next_sequence)
+		return QCRATE_DATA_PACKETIZER_BAD_ARGUMENT;
+	if (packet_sequence == UINT64_MAX)
+		return QCRATE_DATA_PACKETIZER_SEQUENCE_OVERFLOW;
+	status = emit_object(&header, NULL, 0, emit, emit_context);
+	if (status)
+		return status;
+	*next_sequence = packet_sequence + 1;
 	return QCRATE_DATA_PACKETIZER_OK;
 }

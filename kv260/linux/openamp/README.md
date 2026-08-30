@@ -52,7 +52,9 @@ Tracked source of truth:
 - `common/protocol/qcrate_protocol.h`: fixed 64-byte wire ABI.
 - `common/sequence/qcrate_sequence_format.h`: shared event and fault contract.
 - `kv260/r5_freertos/`: Q-Crate FreeRTOS endpoint implementation.
-- `kv260/linux/openamp/qcrate_control.c`: Linux `rpmsg_char` client.
+- `kv260/linux/openamp/qcrate_rpmsg_client.[ch]`: reusable validated Linux
+  `rpmsg_char` transport used by compiled A53 applications.
+- `kv260/linux/openamp/qcrate_control.c`: diagnostic CLI built on that client.
 - `qcrate-sequence`: Linux sequence validator and RPMsg client.
 - `kv260/vitis/`: reproducible Vitis 2024.2 scripts.
 - `qcrate-openamp` Yocto recipe: firmware installation and systemd lifecycle.
@@ -62,7 +64,7 @@ Generated and ignored:
 
 - `build/vitis/workspace/`: disposable Vitis platform and application.
 - `build/artifacts/qcrate-r5.elf`: exported R5 firmware.
-- the ELF, client source, and shared header staged into the Yocto recipe's
+- the ELF, client sources, and shared header staged into the Yocto recipe's
   `files/` directory.
 
 The Vitis flow starts from AMD's `openamp_echo_test` template. It retains AMD's
@@ -278,6 +280,8 @@ kv260/linux/petalinux/qcrate-kv260/project-spec/meta-user/
   recipes-apps/qcrate-openamp/files/qcrate-r5.elf
   recipes-apps/qcrate-openamp/files/qcrate_control.c
   recipes-apps/qcrate-openamp/files/qcrate_protocol.h
+  recipes-apps/qcrate-openamp/files/qcrate_rpmsg_client.c
+  recipes-apps/qcrate-openamp/files/qcrate_rpmsg_client.h
 ```
 
 `build` and `stage` can also be run separately:

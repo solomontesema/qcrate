@@ -2,6 +2,7 @@
 #ifndef QCRATE_DATA_PACKETIZER_H
 #define QCRATE_DATA_PACKETIZER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -35,6 +36,9 @@ struct qcrate_data_packetizer_config {
 	uint16_t fraction_bits;
 	uint16_t timestamp_clock_id;
 	uint64_t config_id;
+	uint64_t first_sample_timestamp;
+	bool first_sample_timestamp_valid;
+	bool end_of_stream;
 };
 
 struct qcrate_data_packetizer_result {
@@ -61,5 +65,14 @@ int qcrate_data_packetize(
 	qcrate_data_emit_fn emit,
 	void *emit_context,
 	struct qcrate_data_packetizer_result *result);
+
+int qcrate_data_emit_end_of_stream(
+	uint32_t stream_id,
+	uint64_t run_id,
+	uint64_t last_shot_id,
+	uint64_t packet_sequence,
+	qcrate_data_emit_fn emit,
+	void *emit_context,
+	uint64_t *next_sequence);
 
 #endif /* QCRATE_DATA_PACKETIZER_H */

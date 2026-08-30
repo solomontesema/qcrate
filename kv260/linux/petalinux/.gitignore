@@ -31,6 +31,8 @@
 **/recipes-apps/qcrate-openamp/files/qcrate-r5.elf
 **/recipes-apps/qcrate-openamp/files/qcrate_control.c
 **/recipes-apps/qcrate-openamp/files/qcrate_protocol.h
+**/recipes-apps/qcrate-openamp/files/qcrate_rpmsg_client.c
+**/recipes-apps/qcrate-openamp/files/qcrate_rpmsg_client.h
 
 # Generated deployment and SDK artifacts
 **/*.bsp

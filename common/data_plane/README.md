@@ -172,7 +172,9 @@ Sequence and count checks remain mandatory even when a CRC is present.
 
 A heartbeat has no payload and uses payload format `NONE`. It keeps an idle
 stream observable without pretending that samples were acquired. It still
-consumes a packet-sequence value.
+consumes a packet-sequence value. A finite multi-shot sender may place
+`END_OF_STREAM` on a final heartbeat after every shot has closed and every
+acquisition buffer has been returned successfully.
 
 ## Flags And Time
 
@@ -187,10 +189,12 @@ The header flags are:
 - `END_OF_STREAM`: no more packets are expected for this stream lifecycle.
 
 Timestamp clock IDs distinguish the shared Q-Crate timebase, TAI nanoseconds,
-and monotonic nanoseconds. A sender must not manufacture precision: until the
-DMA path captures the exact first-sample hardware timestamp, it transmits zero
-and leaves `TIMESTAMP_VALID` clear. A later timestamp implementation can then
-be added without changing the header.
+and monotonic nanoseconds. A sender must not manufacture precision. The
+triggered DMA bank ABI captures the exact first accepted sample time, so the
+sustained sender places that value on the first DATA packet of each shot and
+sets `TIMESTAMP_VALID` there. It leaves later packet timestamps invalid because
+v1 does not claim that their time was independently captured. Sources without
+hardware timestamp evidence transmit zero and leave the flag clear.
 
 ## Loss And Receiver Behavior
 
