@@ -27,6 +27,8 @@
 #include <linux/fs.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/kthread.h>
+#include <linux/ktime.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -37,6 +39,7 @@
 #include <linux/sizes.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/wait.h>
 
 #include "qcrate_dma_uapi.h"
 
@@ -82,6 +85,24 @@
 #define QCRATE_CANCEL_TIMEOUT_MS        1000U
 #define QCRATE_STATUS_TIMEOUT_US        100000U
 
+#define QCRATE_POOL_EVENT_KICK          BIT(0)
+#define QCRATE_POOL_EVENT_DMA_DONE      BIT(1)
+#define QCRATE_POOL_EVENT_STOP          BIT(2)
+
+enum qcrate_pool_bank_state {
+	QCRATE_BANK_FREE = 0,
+	QCRATE_BANK_FILLING,
+	QCRATE_BANK_READY,
+	QCRATE_BANK_USER_OWNED,
+};
+
+struct qcrate_pool_bank {
+	enum qcrate_pool_bank_state state;
+	u32 generation;
+	u64 sequence;
+	struct qcrate_dma_pool_dequeue result;
+};
+
 /* All state owned by the single Q-Crate platform-device instance. */
 struct qcrate_dma_dev {
 	/* Platform control path and DMAEngine provider selected by device tree. */
@@ -107,6 +128,48 @@ struct qcrate_dma_dev {
 	u32 triggered_frame_count;
 	size_t triggered_frame_bytes;
 	size_t triggered_total_bytes;
+
+	/* Additive asynchronous finite-shot bank pool. */
+	struct task_struct *pool_thread;
+	wait_queue_head_t pool_waitq;
+	wait_queue_head_t pool_ready_waitq;
+	atomic_t pool_events;
+	struct completion pool_stop_done;
+	int pool_stop_result;
+	bool pool_configured;
+	bool pool_running;
+	bool pool_stopping;
+	bool pool_faulted;
+	bool pool_starved;
+	bool pool_dma_active;
+	u64 pool_dma_completion_ns;
+	u32 pool_frame_length_words;
+	u32 pool_frame_count;
+	u32 pool_stream_mode;
+	u32 pool_arm_timeout_ms;
+	u32 pool_bank_count;
+	u32 pool_bank_bytes;
+	u32 pool_frame_bytes;
+	u32 pool_filling_bank;
+	u32 pool_ready_banks;
+	u32 pool_user_banks;
+	u32 pool_free_banks;
+	u32 pool_queue_high_water;
+	u32 pool_last_discarded_ready;
+	u32 pool_last_error;
+	u32 pool_last_trigger_shot_id;
+	u64 pool_run_id;
+	u64 pool_next_run_id;
+	u64 pool_next_sequence;
+	u64 pool_produced_banks;
+	u64 pool_dequeued_banks;
+	u64 pool_consumed_banks;
+	u64 pool_starvation_events;
+	u64 pool_skipped_triggers;
+	u64 pool_error_events;
+	u64 pool_produced_bytes;
+	struct qcrate_pool_bank pool_banks[QCRATE_DMA_MAX_POOL_BANKS];
+
 	atomic_t opened;
 	struct miscdevice miscdev;
 };
@@ -123,6 +186,8 @@ struct qcrate_capture_result {
 	u32 stall_cycles;
 };
 
+static bool qcrate_pool_owns_buffer_locked(struct qcrate_dma_dev *qdma);
+
 /* DMAEngine invokes this callback from its tasklet after S2MM completion. */
 static void qcrate_dma_complete(void *arg,
 			       const struct dmaengine_result *result)
@@ -134,6 +199,12 @@ static void qcrate_dma_complete(void *arg,
 	} else {
 		qdma->result.result = DMA_TRANS_NOERROR;
 		qdma->result.residue = 0;
+	}
+	if (READ_ONCE(qdma->pool_dma_active)) {
+		WRITE_ONCE(qdma->pool_dma_completion_ns, ktime_get_ns());
+		atomic_or(QCRATE_POOL_EVENT_DMA_DONE, &qdma->pool_events);
+		wake_up_interruptible(&qdma->pool_waitq);
+		return;
 	}
 	complete(&qdma->completion);
 }
@@ -214,7 +285,8 @@ static int qcrate_validate_capture(struct qcrate_dma_dev *qdma,
 
 /* Submit every frame before allowing either immediate or triggered start. */
 static int qcrate_submit_frames(struct qcrate_dma_dev *qdma,
-				size_t frame_bytes, u32 frame_count,
+				dma_addr_t buffer_dma, size_t frame_bytes,
+				u32 frame_count,
 				bool *descriptors_submitted)
 {
 	struct dma_async_tx_descriptor *desc;
@@ -228,7 +300,7 @@ static int qcrate_submit_frames(struct qcrate_dma_dev *qdma,
 		if (frame == frame_count - 1)
 			flags |= DMA_PREP_INTERRUPT;
 		desc = dmaengine_prep_slave_single(
-			qdma->rx_chan, qdma->buffer_dma + frame * frame_bytes,
+			qdma->rx_chan, buffer_dma + frame * frame_bytes,
 			frame_bytes, DMA_DEV_TO_MEM, flags);
 		if (!desc)
 			return -EIO;
@@ -287,7 +359,7 @@ static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
 	ret = mutex_lock_interruptible(&qdma->capture_lock);
 	if (ret)
 		return ret;
-	if (qdma->triggered_active) {
+	if (qdma->triggered_active || qcrate_pool_owns_buffer_locked(qdma)) {
 		ret = -EBUSY;
 		goto out_unlock;
 	}
@@ -311,7 +383,7 @@ static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
 	iowrite32(0, qdma->regs + QCRATE_STREAM_IRQ_ENABLE);
 	iowrite32(0x3, qdma->regs + QCRATE_STREAM_IRQ_CLEAR);
 
-	ret = qcrate_submit_frames(qdma, frame_bytes, frame_count,
+	ret = qcrate_submit_frames(qdma, qdma->buffer_dma, frame_bytes, frame_count,
 				   &descriptors_submitted);
 	if (ret)
 		goto out_reset;
@@ -492,7 +564,7 @@ static int qcrate_arm_triggered(struct qcrate_dma_dev *qdma,
 	ret = mutex_lock_interruptible(&qdma->capture_lock);
 	if (ret)
 		return ret;
-	if (qdma->triggered_active) {
+	if (qdma->triggered_active || qcrate_pool_owns_buffer_locked(qdma)) {
 		ret = -EBUSY;
 		goto out_unlock;
 	}
@@ -514,7 +586,8 @@ static int qcrate_arm_triggered(struct qcrate_dma_dev *qdma,
 	iowrite32(0, qdma->regs + QCRATE_STREAM_IRQ_ENABLE);
 	iowrite32(0x3, qdma->regs + QCRATE_STREAM_IRQ_CLEAR);
 
-	ret = qcrate_submit_frames(qdma, frame_bytes, arm->frame_count,
+	ret = qcrate_submit_frames(qdma, qdma->buffer_dma, frame_bytes,
+				   arm->frame_count,
 				   &descriptors_submitted);
 	if (ret)
 		goto out_terminate;
@@ -679,6 +752,687 @@ static int qcrate_cancel_triggered(struct qcrate_dma_dev *qdma)
 	return ret;
 }
 
+static bool qcrate_pool_owns_buffer_locked(struct qcrate_dma_dev *qdma)
+{
+	return qdma->pool_running || qdma->pool_stopping ||
+		qdma->pool_dma_active || qdma->pool_ready_banks ||
+		qdma->pool_user_banks;
+}
+
+static u32 qcrate_pool_flags_locked(struct qcrate_dma_dev *qdma)
+{
+	u32 flags = 0;
+	u32 status;
+
+	if (qdma->pool_running)
+		flags |= QCRATE_DMA_POOL_RUNNING;
+	if (qdma->pool_starved)
+		flags |= QCRATE_DMA_POOL_STARVED;
+	if (qdma->pool_faulted)
+		flags |= QCRATE_DMA_POOL_FAULTED;
+	if (qdma->pool_stopping)
+		flags |= QCRATE_DMA_POOL_STOPPING;
+	if (qdma->pool_dma_active) {
+		status = ioread32(qdma->regs + QCRATE_STREAM_STATUS);
+		if (status & QCRATE_STATUS_ARMED)
+			flags |= QCRATE_DMA_POOL_ARMED;
+	}
+	return flags;
+}
+
+static void qcrate_pool_account_missed_locked(struct qcrate_dma_dev *qdma)
+{
+	qdma->pool_skipped_triggers += ioread32(
+		qdma->regs + QCRATE_STREAM_MISSED_TRIGGERS);
+}
+
+static int qcrate_pool_find_free_locked(struct qcrate_dma_dev *qdma)
+{
+	u32 bank;
+
+	for (bank = 0; bank < qdma->pool_bank_count; bank++) {
+		if (qdma->pool_banks[bank].state == QCRATE_BANK_FREE)
+			return bank;
+	}
+	return -ENOSPC;
+}
+
+static int qcrate_pool_find_ready_locked(struct qcrate_dma_dev *qdma)
+{
+	u64 oldest = U64_MAX;
+	int selected = -ENOENT;
+	u32 bank;
+
+	for (bank = 0; bank < qdma->pool_bank_count; bank++) {
+		if (qdma->pool_banks[bank].state == QCRATE_BANK_READY &&
+		    qdma->pool_banks[bank].sequence < oldest) {
+			oldest = qdma->pool_banks[bank].sequence;
+			selected = bank;
+		}
+	}
+	return selected;
+}
+
+static void qcrate_pool_fault_locked(struct qcrate_dma_dev *qdma, int error)
+{
+	qdma->pool_running = false;
+	qdma->pool_faulted = true;
+	qdma->pool_starved = false;
+	qdma->pool_last_error = error < 0 ? -error : error;
+	qdma->pool_error_events++;
+}
+
+/* Drain a finite issued bank; never halt an armed pre-packet S2MM channel. */
+static int qcrate_pool_drain_locked(struct qcrate_dma_dev *qdma,
+				    bool dma_done)
+{
+	unsigned long wait_result;
+	struct qcrate_pool_bank *bank;
+	u32 status;
+	int ret;
+
+	if (!qdma->pool_dma_active)
+		return 0;
+
+	status = ioread32(qdma->regs + QCRATE_STREAM_STATUS);
+	if (!(status & (QCRATE_STATUS_BUSY | QCRATE_STATUS_TRIGGER_SEEN))) {
+		iowrite32(QCRATE_CONTROL_ABORT,
+			  qdma->regs + QCRATE_STREAM_CONTROL);
+		usleep_range(10, 20);
+	}
+
+	if (!dma_done) {
+		wait_result = wait_event_timeout(
+			qdma->pool_waitq,
+			atomic_read(&qdma->pool_events) &
+				QCRATE_POOL_EVENT_DMA_DONE,
+			msecs_to_jiffies(QCRATE_CANCEL_TIMEOUT_MS));
+		if (!wait_result)
+			return -ETIMEDOUT;
+		atomic_andnot(QCRATE_POOL_EVENT_DMA_DONE, &qdma->pool_events);
+	}
+
+	ret = qcrate_wait_complete(qdma, &status);
+	if (ret)
+		return ret;
+	if (qdma->result.result != DMA_TRANS_NOERROR || qdma->result.residue)
+		return -EIO;
+
+	qcrate_pool_account_missed_locked(qdma);
+	ret = qcrate_reset_stream(qdma);
+	if (ret)
+		return ret;
+
+	bank = &qdma->pool_banks[qdma->pool_filling_bank];
+	bank->state = QCRATE_BANK_FREE;
+	qdma->pool_free_banks++;
+	qdma->pool_filling_bank = QCRATE_DMA_BANK_NONE;
+	qdma->pool_dma_active = false;
+	return 0;
+}
+
+static int qcrate_pool_arm_bank_locked(struct qcrate_dma_dev *qdma, u32 index)
+{
+	struct qcrate_pool_bank *bank = &qdma->pool_banks[index];
+	dma_addr_t bank_dma = qdma->buffer_dma + index * qdma->pool_bank_bytes;
+	bool descriptors_submitted = false;
+	u32 status;
+	int ret;
+
+	if (bank->state != QCRATE_BANK_FREE || qdma->pool_dma_active)
+		return -EINVAL;
+
+	/* Include triggers accumulated while the pool had no FREE bank. */
+	qcrate_pool_account_missed_locked(qdma);
+	ret = qcrate_reset_stream(qdma);
+	if (ret)
+		return ret;
+
+	memset((u8 *)qdma->buffer + index * qdma->pool_bank_bytes, 0xa5,
+	       qdma->pool_bank_bytes);
+	qdma->result.result = DMA_TRANS_ABORTED;
+	qdma->result.residue = qdma->pool_frame_bytes;
+
+	iowrite32(0, qdma->regs + QCRATE_STREAM_CONTROL);
+	iowrite32(qdma->pool_frame_length_words,
+		  qdma->regs + QCRATE_STREAM_FRAME_LENGTH);
+	iowrite32(qdma->pool_frame_count,
+		  qdma->regs + QCRATE_STREAM_FRAME_COUNT);
+	iowrite32(qdma->pool_stream_mode,
+		  qdma->regs + QCRATE_STREAM_MODE);
+	iowrite32(0, qdma->regs + QCRATE_STREAM_IRQ_ENABLE);
+	iowrite32(0x3, qdma->regs + QCRATE_STREAM_IRQ_CLEAR);
+
+	ret = qcrate_submit_frames(qdma, bank_dma, qdma->pool_frame_bytes,
+				   qdma->pool_frame_count,
+				   &descriptors_submitted);
+	if (ret)
+		goto terminate;
+
+	bank->state = QCRATE_BANK_FILLING;
+	bank->generation++;
+	qdma->pool_free_banks--;
+	qdma->pool_filling_bank = index;
+	qdma->pool_dma_active = true;
+	dma_async_issue_pending(qdma->rx_chan);
+
+	iowrite32(QCRATE_CONTROL_ARM_TRIGGERED,
+		  qdma->regs + QCRATE_STREAM_CONTROL);
+	usleep_range(10, 20);
+	ret = readl_poll_timeout(
+		qdma->regs + QCRATE_STREAM_STATUS, status,
+		(status & QCRATE_STATUS_ARMED) &&
+			!(status & QCRATE_STATUS_COMMAND_BUSY),
+		10, qdma->pool_arm_timeout_ms * 1000U);
+	if (!ret) {
+		qdma->pool_starved = false;
+		return 0;
+	}
+
+	dev_err(qdma->dev, "pool bank %u failed to arm (status 0x%08x)\n",
+		index, status);
+	if (qcrate_pool_drain_locked(qdma, false))
+		dev_err(qdma->dev, "pool bank %u arm recovery failed\n", index);
+	return ret;
+
+terminate:
+	qcrate_reset_stream(qdma);
+	if (descriptors_submitted)
+		dmaengine_terminate_sync(qdma->rx_chan);
+	return ret;
+}
+
+static int qcrate_pool_finalize_locked(struct qcrate_dma_dev *qdma)
+{
+	struct qcrate_dma_pool_dequeue *result;
+	struct qcrate_pool_bank *bank;
+	u32 index = qdma->pool_filling_bank;
+	u32 status;
+	int ret;
+
+	if (!qdma->pool_dma_active || index >= qdma->pool_bank_count)
+		return -EINVAL;
+
+	bank = &qdma->pool_banks[index];
+	result = &bank->result;
+	memset(result, 0, sizeof(*result));
+
+	ret = qcrate_wait_complete(qdma, &status);
+	if (ret)
+		goto failed;
+
+	result->bank_index = index;
+	result->bank_generation = bank->generation;
+	result->offset_bytes = index * qdma->pool_bank_bytes;
+	result->valid_bytes = qdma->pool_bank_bytes;
+	result->frame_length_words = qdma->pool_frame_length_words;
+	result->frame_count = qdma->pool_frame_count;
+	result->stream_mode = qdma->pool_stream_mode;
+	result->dma_result = qdma->result.result;
+	result->last_residue_bytes = min_t(u32, qdma->result.residue,
+					      qdma->pool_frame_bytes);
+	result->stream_status = status;
+	result->completed_frames = ioread32(
+		qdma->regs + QCRATE_STREAM_COMPLETED_FRAMES);
+	result->current_frame_id = ioread32(
+		qdma->regs + QCRATE_STREAM_CURRENT_FRAME_ID);
+	result->current_sample_index = ioread32(
+		qdma->regs + QCRATE_STREAM_CURRENT_SAMPLE);
+	result->stall_cycles = ioread32(
+		qdma->regs + QCRATE_STREAM_STALL_CYCLES);
+	result->trigger_shot_id = ioread32(
+		qdma->regs + QCRATE_STREAM_TRIGGER_SHOT_ID);
+	result->trigger_count = ioread32(
+		qdma->regs + QCRATE_STREAM_TRIGGER_COUNT);
+	result->missed_trigger_count = ioread32(
+		qdma->regs + QCRATE_STREAM_MISSED_TRIGGERS);
+	result->trigger_time = qcrate_read_timestamp(
+		qdma, QCRATE_STREAM_TRIGGER_TIME_LO,
+		QCRATE_STREAM_TRIGGER_TIME_HI);
+	result->first_sample_time = qcrate_read_timestamp(
+		qdma, QCRATE_STREAM_FIRST_TIME_LO,
+		QCRATE_STREAM_FIRST_TIME_HI);
+	if (status & QCRATE_STATUS_TRIGGER_SEEN)
+		result->timestamp_flags |= QCRATE_DMA_TRIGGER_SEEN;
+	if (status & QCRATE_STATUS_FIRST_TIME_VALID)
+		result->timestamp_flags |=
+			QCRATE_DMA_FIRST_SAMPLE_TIME_VALID;
+
+	if (result->dma_result != DMA_TRANS_NOERROR ||
+	    result->last_residue_bytes ||
+	    !(status & QCRATE_STATUS_DONE) ||
+	    (status & QCRATE_STATUS_ERROR) ||
+	    result->completed_frames != qdma->pool_frame_count ||
+	    result->current_frame_id != qdma->pool_frame_count - 1 ||
+	    result->current_sample_index !=
+		qdma->pool_frame_length_words - 1 ||
+	    result->trigger_count != 1 ||
+	    (result->timestamp_flags &
+		(QCRATE_DMA_TRIGGER_SEEN |
+		 QCRATE_DMA_FIRST_SAMPLE_TIME_VALID)) !=
+		(QCRATE_DMA_TRIGGER_SEEN |
+		 QCRATE_DMA_FIRST_SAMPLE_TIME_VALID) ||
+	    result->first_sample_time < result->trigger_time) {
+		ret = -EIO;
+		goto failed;
+	}
+
+	qcrate_pool_account_missed_locked(qdma);
+	ret = qcrate_reset_stream(qdma);
+	if (ret)
+		goto failed_without_reset;
+
+	qdma->pool_dma_active = false;
+	qdma->pool_filling_bank = QCRATE_DMA_BANK_NONE;
+	bank->state = QCRATE_BANK_READY;
+	bank->sequence = qdma->pool_next_sequence++;
+	result->run_id = qdma->pool_run_id;
+	result->bank_sequence = bank->sequence;
+	result->completion_mono_ns = READ_ONCE(qdma->pool_dma_completion_ns);
+	qdma->pool_ready_banks++;
+	qdma->pool_produced_banks++;
+	qdma->pool_produced_bytes += qdma->pool_bank_bytes;
+	qdma->pool_last_trigger_shot_id = result->trigger_shot_id;
+	qdma->pool_queue_high_water = max(qdma->pool_queue_high_water,
+					  qdma->pool_ready_banks);
+	return 0;
+
+failed:
+	qcrate_pool_account_missed_locked(qdma);
+	if (qcrate_reset_stream(qdma))
+		dev_err(qdma->dev, "pool completion reset failed\n");
+failed_without_reset:
+	qdma->pool_dma_active = false;
+	qdma->pool_filling_bank = QCRATE_DMA_BANK_NONE;
+	bank->state = QCRATE_BANK_FREE;
+	qdma->pool_free_banks++;
+	return ret;
+}
+
+static void qcrate_pool_discard_ready_locked(struct qcrate_dma_dev *qdma)
+{
+	u32 bank;
+
+	qdma->pool_last_discarded_ready = 0;
+	for (bank = 0; bank < qdma->pool_bank_count; bank++) {
+		if (qdma->pool_banks[bank].state == QCRATE_BANK_READY) {
+			qdma->pool_banks[bank].state = QCRATE_BANK_FREE;
+			qdma->pool_ready_banks--;
+			qdma->pool_free_banks++;
+			qdma->pool_last_discarded_ready++;
+		}
+	}
+}
+
+static int qcrate_pool_thread_fn(void *argument)
+{
+	struct qcrate_dma_dev *qdma = argument;
+
+	while (!kthread_should_stop()) {
+		int events;
+		int bank;
+		int ret = 0;
+		bool wake_ready = false;
+
+		wait_event_interruptible(qdma->pool_waitq,
+			kthread_should_stop() || atomic_read(&qdma->pool_events));
+		if (kthread_should_stop())
+			break;
+		events = atomic_xchg(&qdma->pool_events, 0);
+
+		mutex_lock(&qdma->capture_lock);
+		if (events & QCRATE_POOL_EVENT_STOP) {
+			qdma->pool_running = false;
+			if (qdma->pool_dma_active)
+				ret = qcrate_pool_drain_locked(
+					qdma,
+					events & QCRATE_POOL_EVENT_DMA_DONE);
+			else if (qdma->pool_configured) {
+				qcrate_pool_account_missed_locked(qdma);
+				ret = qcrate_reset_stream(qdma);
+			}
+			if (!ret)
+				qcrate_pool_discard_ready_locked(qdma);
+			else
+				qcrate_pool_fault_locked(qdma, ret);
+			qdma->pool_stop_result = ret;
+			qdma->pool_stopping = false;
+			qdma->pool_starved = false;
+			complete_all(&qdma->pool_stop_done);
+			wake_up_interruptible(&qdma->pool_ready_waitq);
+			mutex_unlock(&qdma->capture_lock);
+			continue;
+		}
+
+		if ((events & QCRATE_POOL_EVENT_DMA_DONE) &&
+		    qdma->pool_dma_active) {
+			ret = qcrate_pool_finalize_locked(qdma);
+			wake_ready = true;
+			if (ret)
+				qcrate_pool_fault_locked(qdma, ret);
+		}
+
+		if (qdma->pool_running && !qdma->pool_faulted &&
+		    !qdma->pool_dma_active) {
+			bank = qcrate_pool_find_free_locked(qdma);
+			if (bank < 0) {
+				if (!qdma->pool_starved) {
+					qdma->pool_starved = true;
+					qdma->pool_starvation_events++;
+				}
+			} else {
+				ret = qcrate_pool_arm_bank_locked(qdma, bank);
+				if (ret)
+					qcrate_pool_fault_locked(qdma, ret);
+			}
+		}
+
+		if (wake_ready || (events & QCRATE_POOL_EVENT_KICK) ||
+		    qdma->pool_faulted)
+			wake_up_interruptible(&qdma->pool_ready_waitq);
+		mutex_unlock(&qdma->capture_lock);
+	}
+	return 0;
+}
+
+static int qcrate_pool_start(struct qcrate_dma_dev *qdma,
+			     struct qcrate_dma_pool_start *start)
+{
+	size_t frame_bytes;
+	size_t bank_bytes;
+	size_t pool_bytes;
+	u32 bank;
+	int ret;
+
+	if (start->flags != QCRATE_DMA_POOL_START_TRIGGERED)
+		return -EINVAL;
+	if (!qdma->has_sg)
+		return -EOPNOTSUPP;
+	if (start->bank_count < 2 ||
+	    start->bank_count > QCRATE_DMA_MAX_POOL_BANKS)
+		return -EINVAL;
+	if (!start->arm_timeout_ms)
+		start->arm_timeout_ms = QCRATE_DEFAULT_TIMEOUT_MS;
+	if (start->arm_timeout_ms > QCRATE_MAX_TIMEOUT_MS)
+		return -EINVAL;
+
+	ret = qcrate_validate_capture(qdma, start->frame_length_words,
+				      start->frame_count, start->stream_mode,
+				      &frame_bytes, &bank_bytes);
+	if (ret)
+		return ret;
+	if (check_mul_overflow(bank_bytes, (size_t)start->bank_count,
+			       &pool_bytes) || pool_bytes > qdma->buffer_bytes)
+		return -EMSGSIZE;
+
+	ret = mutex_lock_interruptible(&qdma->capture_lock);
+	if (ret)
+		return ret;
+	if (qdma->triggered_active || qcrate_pool_owns_buffer_locked(qdma)) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	/* Clear stale status before run-local counters begin. */
+	ret = qcrate_reset_stream(qdma);
+	if (ret)
+		goto unlock;
+
+	qdma->pool_configured = true;
+	qdma->pool_running = true;
+	qdma->pool_stopping = false;
+	qdma->pool_faulted = false;
+	qdma->pool_starved = false;
+	qdma->pool_dma_active = false;
+	qdma->pool_frame_length_words = start->frame_length_words;
+	qdma->pool_frame_count = start->frame_count;
+	qdma->pool_stream_mode = start->stream_mode;
+	qdma->pool_arm_timeout_ms = start->arm_timeout_ms;
+	qdma->pool_bank_count = start->bank_count;
+	qdma->pool_frame_bytes = frame_bytes;
+	qdma->pool_bank_bytes = bank_bytes;
+	qdma->pool_filling_bank = QCRATE_DMA_BANK_NONE;
+	qdma->pool_ready_banks = 0;
+	qdma->pool_user_banks = 0;
+	qdma->pool_free_banks = start->bank_count;
+	qdma->pool_queue_high_water = 0;
+	qdma->pool_last_error = 0;
+	qdma->pool_last_discarded_ready = 0;
+	qdma->pool_last_trigger_shot_id = 0;
+	qdma->pool_run_id = qdma->pool_next_run_id++;
+	qdma->pool_next_sequence = 1;
+	qdma->pool_produced_banks = 0;
+	qdma->pool_dequeued_banks = 0;
+	qdma->pool_consumed_banks = 0;
+	qdma->pool_starvation_events = 0;
+	qdma->pool_skipped_triggers = 0;
+	qdma->pool_error_events = 0;
+	qdma->pool_produced_bytes = 0;
+	for (bank = 0; bank < QCRATE_DMA_MAX_POOL_BANKS; bank++) {
+		qdma->pool_banks[bank].state = QCRATE_BANK_FREE;
+		qdma->pool_banks[bank].sequence = 0;
+		memset(&qdma->pool_banks[bank].result, 0,
+		       sizeof(qdma->pool_banks[bank].result));
+	}
+
+	ret = qcrate_pool_arm_bank_locked(qdma, 0);
+	if (ret) {
+		qcrate_pool_fault_locked(qdma, ret);
+		goto unlock;
+	}
+	start->bank_bytes = qdma->pool_bank_bytes;
+	start->run_id = qdma->pool_run_id;
+
+unlock:
+	mutex_unlock(&qdma->capture_lock);
+	return ret;
+}
+
+static bool qcrate_pool_dequeue_ready(struct qcrate_dma_dev *qdma)
+{
+	return READ_ONCE(qdma->pool_ready_banks) ||
+		!READ_ONCE(qdma->pool_running) ||
+		READ_ONCE(qdma->pool_faulted);
+}
+
+static int qcrate_pool_dequeue(struct qcrate_dma_dev *qdma,
+			       struct qcrate_dma_pool_dequeue *dequeue)
+{
+	struct qcrate_pool_bank *bank;
+	long wait_result;
+	int index;
+	int ret;
+
+	if (dequeue->timeout_ms > QCRATE_MAX_TIMEOUT_MS)
+		return -EINVAL;
+	if (dequeue->timeout_ms) {
+		wait_result = wait_event_interruptible_timeout(
+			qdma->pool_ready_waitq,
+			qcrate_pool_dequeue_ready(qdma),
+			msecs_to_jiffies(dequeue->timeout_ms));
+		if (wait_result < 0)
+			return wait_result;
+		if (!wait_result)
+			return -ETIMEDOUT;
+	}
+
+	ret = mutex_lock_interruptible(&qdma->capture_lock);
+	if (ret)
+		return ret;
+	index = qcrate_pool_find_ready_locked(qdma);
+	if (index < 0) {
+		ret = qdma->pool_faulted ? -EIO :
+			(qdma->pool_running ? -EAGAIN : -ESHUTDOWN);
+		goto unlock;
+	}
+
+	bank = &qdma->pool_banks[index];
+	*dequeue = bank->result;
+	dequeue->pool_flags = qcrate_pool_flags_locked(qdma);
+	bank->state = QCRATE_BANK_USER_OWNED;
+	qdma->pool_ready_banks--;
+	qdma->pool_user_banks++;
+	qdma->pool_dequeued_banks++;
+	ret = 0;
+
+unlock:
+	mutex_unlock(&qdma->capture_lock);
+	return ret;
+}
+
+static int qcrate_pool_release_bank(struct qcrate_dma_dev *qdma,
+				    struct qcrate_dma_pool_release *release)
+{
+	struct qcrate_pool_bank *bank;
+	long wait_result;
+	bool wait_for_arm;
+	u32 timeout_ms;
+	int ret;
+
+	ret = mutex_lock_interruptible(&qdma->capture_lock);
+	if (ret)
+		return ret;
+	if (release->bank_index >= qdma->pool_bank_count ||
+	    release->run_id != qdma->pool_run_id) {
+		ret = -ESTALE;
+		goto unlock;
+	}
+	bank = &qdma->pool_banks[release->bank_index];
+	if (bank->state != QCRATE_BANK_USER_OWNED ||
+	    release->bank_generation != bank->generation ||
+	    release->bank_sequence != bank->sequence) {
+		ret = -ESTALE;
+		goto unlock;
+	}
+
+	bank->state = QCRATE_BANK_FREE;
+	qdma->pool_user_banks--;
+	qdma->pool_free_banks++;
+	qdma->pool_consumed_banks++;
+	wait_for_arm = qdma->pool_running && !qdma->pool_dma_active;
+	timeout_ms = qdma->pool_arm_timeout_ms;
+	ret = 0;
+	atomic_or(QCRATE_POOL_EVENT_KICK, &qdma->pool_events);
+	wake_up_interruptible(&qdma->pool_waitq);
+	mutex_unlock(&qdma->capture_lock);
+
+	if (!wait_for_arm)
+		return 0;
+	wait_result = wait_event_interruptible_timeout(
+		qdma->pool_ready_waitq,
+		READ_ONCE(qdma->pool_dma_active) ||
+		READ_ONCE(qdma->pool_faulted) ||
+		!READ_ONCE(qdma->pool_running),
+		msecs_to_jiffies(timeout_ms));
+	if (wait_result < 0)
+		return wait_result;
+	if (!wait_result)
+		return -ETIMEDOUT;
+	if (READ_ONCE(qdma->pool_faulted))
+		return -EIO;
+	return READ_ONCE(qdma->pool_dma_active) ? 0 : -ESHUTDOWN;
+
+unlock:
+	mutex_unlock(&qdma->capture_lock);
+	return ret;
+}
+
+static void qcrate_pool_get_status_locked(
+	struct qcrate_dma_dev *qdma, struct qcrate_dma_pool_status *status)
+{
+	memset(status, 0, sizeof(*status));
+	status->pool_flags = qcrate_pool_flags_locked(qdma);
+	status->bank_count = qdma->pool_bank_count;
+	status->bank_bytes = qdma->pool_bank_bytes;
+	status->frame_length_words = qdma->pool_frame_length_words;
+	status->frame_count = qdma->pool_frame_count;
+	status->stream_mode = qdma->pool_stream_mode;
+	status->filling_bank = qdma->pool_filling_bank;
+	status->ready_banks = qdma->pool_ready_banks;
+	status->user_banks = qdma->pool_user_banks;
+	status->free_banks = qdma->pool_free_banks;
+	status->queue_high_water = qdma->pool_queue_high_water;
+	status->last_error = qdma->pool_last_error;
+	status->last_trigger_shot_id = qdma->pool_last_trigger_shot_id;
+	status->run_id = qdma->pool_run_id;
+	status->produced_banks = qdma->pool_produced_banks;
+	status->dequeued_banks = qdma->pool_dequeued_banks;
+	status->consumed_banks = qdma->pool_consumed_banks;
+	status->starvation_events = qdma->pool_starvation_events;
+	status->skipped_triggers = qdma->pool_skipped_triggers;
+	if (qdma->pool_configured)
+		status->skipped_triggers += ioread32(
+			qdma->regs + QCRATE_STREAM_MISSED_TRIGGERS);
+	status->error_events = qdma->pool_error_events;
+	status->produced_bytes = qdma->pool_produced_bytes;
+}
+
+static int qcrate_pool_get_status(struct qcrate_dma_dev *qdma,
+				  struct qcrate_dma_pool_status *status)
+{
+	int ret = mutex_lock_interruptible(&qdma->capture_lock);
+
+	if (ret)
+		return ret;
+	qcrate_pool_get_status_locked(qdma, status);
+	mutex_unlock(&qdma->capture_lock);
+	return 0;
+}
+
+static int qcrate_pool_stop(struct qcrate_dma_dev *qdma,
+			    struct qcrate_dma_pool_stop *stop)
+{
+	unsigned long wait_result;
+	int ret;
+
+	if (stop->flags || memchr_inv(stop->reserved, 0,
+				      sizeof(stop->reserved)))
+		return -EINVAL;
+	if (!stop->timeout_ms)
+		stop->timeout_ms = QCRATE_DEFAULT_TIMEOUT_MS;
+	if (stop->timeout_ms > QCRATE_MAX_TIMEOUT_MS)
+		return -EINVAL;
+
+	ret = mutex_lock_interruptible(&qdma->capture_lock);
+	if (ret)
+		return ret;
+	if (!qdma->pool_configured ||
+	    (stop->run_id && stop->run_id != qdma->pool_run_id)) {
+		ret = -ESTALE;
+		goto unlock;
+	}
+	if (qdma->pool_stopping) {
+		ret = -EBUSY;
+		goto unlock;
+	}
+
+	qdma->pool_running = false;
+	qdma->pool_stopping = true;
+	qdma->pool_stop_result = 0;
+	reinit_completion(&qdma->pool_stop_done);
+	atomic_or(QCRATE_POOL_EVENT_STOP, &qdma->pool_events);
+	wake_up_interruptible(&qdma->pool_waitq);
+	mutex_unlock(&qdma->capture_lock);
+
+	wait_result = wait_for_completion_interruptible_timeout(
+		&qdma->pool_stop_done, msecs_to_jiffies(stop->timeout_ms));
+	if (wait_result < 0)
+		return wait_result;
+	if (!wait_result)
+		return -ETIMEDOUT;
+
+	mutex_lock(&qdma->capture_lock);
+	stop->run_id = qdma->pool_run_id;
+	stop->discarded_ready_banks = qdma->pool_last_discarded_ready;
+	ret = qdma->pool_stop_result;
+	mutex_unlock(&qdma->capture_lock);
+	return ret;
+
+unlock:
+	mutex_unlock(&qdma->capture_lock);
+	return ret;
+}
+
 /* Implement the fixed-width UAPI declared in qcrate_dma_uapi.h. */
 static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 			     unsigned long argument)
@@ -689,6 +1443,11 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 	struct qcrate_dma_capture_frames capture_frames;
 	struct qcrate_dma_triggered_arm triggered_arm;
 	struct qcrate_dma_triggered_result triggered_result;
+	struct qcrate_dma_pool_start pool_start;
+	struct qcrate_dma_pool_dequeue pool_dequeue;
+	struct qcrate_dma_pool_release pool_release;
+	struct qcrate_dma_pool_status pool_status;
+	struct qcrate_dma_pool_stop pool_stop;
 	struct qcrate_dma_info info = {
 		.abi_version = QCRATE_DMA_ABI_VERSION,
 		.buffer_bytes = qdma->buffer_bytes,
@@ -699,7 +1458,8 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 		.abi_version = QCRATE_DMA_ABI_VERSION,
 		.feature_flags = QCRATE_DMA_CAP_DSP_MODE |
 			QCRATE_DMA_CAP_TRIGGERED |
-			(qdma->has_sg ? QCRATE_DMA_CAP_SG_CHAIN : 0),
+			(qdma->has_sg ? (QCRATE_DMA_CAP_SG_CHAIN |
+					 QCRATE_DMA_CAP_BANK_POOL) : 0),
 		.max_chain_frames = qdma->has_sg ?
 			QCRATE_DMA_MAX_CHAIN_FRAMES : 1,
 	};
@@ -767,6 +1527,59 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 	case QCRATE_DMA_IOC_CANCEL_TRIGGERED:
 		return qcrate_cancel_triggered(qdma);
 
+	case QCRATE_DMA_IOC_POOL_START:
+		if (copy_from_user(&pool_start, user_arg, sizeof(pool_start)))
+			return -EFAULT;
+		if (pool_start.reserved0 || pool_start.bank_bytes ||
+		    pool_start.run_id ||
+		    memchr_inv(pool_start.reserved, 0,
+			       sizeof(pool_start.reserved)))
+			return -EINVAL;
+		ret = qcrate_pool_start(qdma, &pool_start);
+		if (copy_to_user(user_arg, &pool_start, sizeof(pool_start)))
+			return -EFAULT;
+		return ret;
+
+	case QCRATE_DMA_IOC_POOL_DEQUEUE:
+		if (copy_from_user(&pool_dequeue, user_arg,
+				   sizeof(pool_dequeue)))
+			return -EFAULT;
+		if (memchr_inv(pool_dequeue.reserved, 0,
+			       sizeof(pool_dequeue.reserved)))
+			return -EINVAL;
+		ret = qcrate_pool_dequeue(qdma, &pool_dequeue);
+		if (copy_to_user(user_arg, &pool_dequeue,
+				 sizeof(pool_dequeue)))
+			return -EFAULT;
+		return ret;
+
+	case QCRATE_DMA_IOC_POOL_RELEASE:
+		if (copy_from_user(&pool_release, user_arg,
+				   sizeof(pool_release)))
+			return -EFAULT;
+		if (memchr_inv(pool_release.reserved, 0,
+			       sizeof(pool_release.reserved)))
+			return -EINVAL;
+		return qcrate_pool_release_bank(qdma, &pool_release);
+
+	case QCRATE_DMA_IOC_POOL_STATUS:
+		ret = qcrate_pool_get_status(qdma, &pool_status);
+		if (ret)
+			return ret;
+		if (copy_to_user(user_arg, &pool_status, sizeof(pool_status)))
+			return -EFAULT;
+		return 0;
+
+	case QCRATE_DMA_IOC_POOL_STOP:
+		if (copy_from_user(&pool_stop, user_arg, sizeof(pool_stop)))
+			return -EFAULT;
+		if (pool_stop.reserved0 || pool_stop.discarded_ready_banks)
+			return -EINVAL;
+		ret = qcrate_pool_stop(qdma, &pool_stop);
+		if (copy_to_user(user_arg, &pool_stop, sizeof(pool_stop)))
+			return -EFAULT;
+		return ret;
+
 	default:
 		return -ENOTTY;
 	}
@@ -789,10 +1602,28 @@ static int qcrate_dma_open(struct inode *inode, struct file *file)
 static int qcrate_dma_release(struct inode *inode, struct file *file)
 {
 	struct qcrate_dma_dev *qdma = file->private_data;
+	struct qcrate_dma_pool_stop stop = {
+		.timeout_ms = QCRATE_CANCEL_TIMEOUT_MS,
+	};
+	bool stop_pool;
+	u32 bank;
+
+	mutex_lock(&qdma->capture_lock);
+	stop_pool = qdma->pool_configured;
+	stop.run_id = qdma->pool_run_id;
+	mutex_unlock(&qdma->capture_lock);
+	if (stop_pool && qcrate_pool_stop(qdma, &stop))
+		dev_err(qdma->dev, "release failed to stop DMA bank pool\n");
 
 	mutex_lock(&qdma->capture_lock);
 	if (qcrate_cancel_triggered_locked(qdma))
 		dev_err(qdma->dev, "release left triggered DMA transaction active\n");
+	for (bank = 0; bank < qdma->pool_bank_count; bank++)
+		qdma->pool_banks[bank].state = QCRATE_BANK_FREE;
+	qdma->pool_ready_banks = 0;
+	qdma->pool_user_banks = 0;
+	qdma->pool_free_banks = qdma->pool_bank_count;
+	qdma->pool_configured = false;
 	mutex_unlock(&qdma->capture_lock);
 	atomic_set(&qdma->opened, 0);
 	return 0;
@@ -912,8 +1743,20 @@ static int qcrate_dma_probe(struct platform_device *pdev)
 	}
 
 	init_completion(&qdma->completion);
+	init_completion(&qdma->pool_stop_done);
 	mutex_init(&qdma->capture_lock);
+	init_waitqueue_head(&qdma->pool_waitq);
+	init_waitqueue_head(&qdma->pool_ready_waitq);
+	atomic_set(&qdma->pool_events, 0);
+	qdma->pool_filling_bank = QCRATE_DMA_BANK_NONE;
+	qdma->pool_next_run_id = 1;
 	atomic_set(&qdma->opened, 0);
+	qdma->pool_thread = kthread_run(qcrate_pool_thread_fn, qdma,
+					"qcrate-dma-pool");
+	if (IS_ERR(qdma->pool_thread)) {
+		ret = PTR_ERR(qdma->pool_thread);
+		goto free_buffer;
+	}
 	qdma->miscdev.minor = MISC_DYNAMIC_MINOR;
 	qdma->miscdev.name = "qcrate-dma";
 	qdma->miscdev.fops = &qcrate_dma_fops;
@@ -922,7 +1765,7 @@ static int qcrate_dma_probe(struct platform_device *pdev)
 
 	ret = misc_register(&qdma->miscdev);
 	if (ret)
-		goto free_buffer;
+		goto stop_thread;
 
 	platform_set_drvdata(pdev, qdma);
 	dev_info(&pdev->dev,
@@ -931,6 +1774,8 @@ static int qcrate_dma_probe(struct platform_device *pdev)
 		 qdma->has_sg ? "enabled" : "disabled");
 	return 0;
 
+stop_thread:
+	kthread_stop(qdma->pool_thread);
 free_buffer:
 	dma_free_coherent(qdma->dma_dev, qdma->buffer_bytes, qdma->buffer,
 			  qdma->buffer_dma);
@@ -943,8 +1788,17 @@ release_channel:
 static int qcrate_dma_remove(struct platform_device *pdev)
 {
 	struct qcrate_dma_dev *qdma = platform_get_drvdata(pdev);
+	struct qcrate_dma_pool_stop stop = {
+		.timeout_ms = QCRATE_CANCEL_TIMEOUT_MS,
+	};
 
 	misc_deregister(&qdma->miscdev);
+	if (qdma->pool_configured) {
+		stop.run_id = qdma->pool_run_id;
+		if (qcrate_pool_stop(qdma, &stop))
+			dev_err(qdma->dev, "remove failed to stop DMA bank pool\n");
+	}
+	kthread_stop(qdma->pool_thread);
 	dmaengine_terminate_sync(qdma->rx_chan);
 	qcrate_reset_stream(qdma);
 	dma_free_coherent(qdma->dma_dev, qdma->buffer_bytes, qdma->buffer,
@@ -970,5 +1824,5 @@ static struct platform_driver qcrate_dma_driver = {
 module_platform_driver(qcrate_dma_driver);
 
 MODULE_AUTHOR("Q-Crate project");
-MODULE_DESCRIPTION("Q-Crate AXI DMA S2MM capture driver");
+MODULE_DESCRIPTION("Q-Crate synchronous and bank-pooled AXI DMA capture driver");
 MODULE_LICENSE("GPL");

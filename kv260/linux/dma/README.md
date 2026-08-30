@@ -34,13 +34,16 @@ Current source scope:
 - exact verification of DSP IQ words selected by `STREAM_MODE=1`;
 - DMA-before-trigger ownership with separate arm, wait, and cancel operations;
 - coherent shot identity, accepted-trigger time, and first-transfer time;
+- an additive asynchronous finite-SG bank pool for overlapping acquisition and
+  userspace work without overwriting unread data;
 - backward-compatible one-frame capture and repeat testing.
 
-Cyclic rings, indefinite acquisition, concurrent userspace consumption, and
+Cyclic rings, indefinite acquisition, multiple concurrent consumers, and
 sustained network streaming remain later milestones. `capture --repeat 100`
 still starts 100 independent one-frame commands. `capture-frames --frames N`
 starts the stream once and receives frame IDs `0` through `N-1` through a
-pre-armed SG chain.
+pre-armed SG chain. The bank-pool API is separate, so these accepted synchronous
+interfaces retain their original behavior.
 
 Status:
 
@@ -49,6 +52,11 @@ Status:
 - Finite SG-chain capture accepted on KV260: the 4096-word one-frame regression,
   one 8-frame chain, one 64-frame chain filling the complete 1 MiB buffer, and
   100 repeated 8-frame chains all passed with every word and frame ID verified.
+- Triggered acquisition accepted on KV260: ten R5-owned sequence shots returned
+  exact DSP payloads, increasing shot IDs, 50-tick trigger-to-sample latency,
+  and zero missed triggers or stalls.
+- Asynchronous finite-SG bank pool accepted on KV260: normal overlap and forced
+  starvation both preserved exact payloads and all legacy capture paths passed.
 
 ## Multi-frame architecture decision
 
@@ -236,6 +244,62 @@ actually transferred (`TVALID && TREADY`). Their difference therefore includes
 the deterministic DSP pipeline latency and any initial DMA backpressure. It is
 not merely the cycle when `TVALID` first asserted.
 
+## Asynchronous finite-SG bank pool
+
+DP-5B adds overlap without adopting a silently overwriting cyclic ring. The
+driver partitions its existing coherent allocation into equal banks. Every bank
+contains one complete finite SG capture and follows exactly this lifecycle:
+
+```text
+FREE -> FILLING -> READY -> USER_OWNED -> FREE
+          DMA       driver       userspace
+```
+
+Only the kernel changes a bank's state. `DEQUEUE` atomically grants the oldest
+`READY` bank to the one exclusive file owner; `RELEASE` must return the exact
+run ID, bank index, generation, and bank sequence granted by `DEQUEUE`. A stale,
+duplicate, or cross-run token is rejected. Userspace may inspect only the
+granted byte range in the read-only coherent-buffer mapping.
+
+The worker thread owns rearming and state transitions. The DMAEngine callback
+does the minimum tasklet-safe work: it records the provider result and monotonic
+completion time, sets an event, and wakes the worker. The worker verifies DMA,
+stream, frame, trigger, and timestamp evidence; resets the finite transaction;
+marks the completed bank `READY`; then arms a `FREE` bank before waking a
+blocked `DEQUEUE`. This keeps sleepable APB and DMA preparation out of callback
+context while normally presenting the next armed destination when userspace
+receives the previous one.
+
+The additive ABI operations are:
+
+| Operation | Contract |
+| --- | --- |
+| `POOL_START` | Validate geometry, partition at least two banks, and return only after the first bank is armed |
+| `POOL_DEQUEUE` | Wait with a bounded timeout and grant the oldest completed bank with all capture metadata |
+| `POOL_RELEASE` | Validate the ownership token, return one bank to `FREE`, and rearm synchronously if the pool was starved |
+| `POOL_STATUS` | Report ownership counts, run identity, queue high-water, produced/consumed bytes and banks, starvation, skipped triggers, and errors |
+| `POOL_STOP` | Stop rearming, drain an issued finite transaction, discard `READY` banks, and preserve `USER_OWNED` banks until release or close |
+
+The ABI version remains one because all existing layouts and operation numbers
+are unchanged. `QCRATE_DMA_CAP_BANK_POOL` advertises the extension. New layouts
+use fixed-width fields, explicit reserved space, and compile-time size checks;
+the canonical definitions remain in `common/dma/qcrate_dma_uapi.h`.
+
+No-free-bank behavior is deliberate backpressure at the acquisition boundary,
+not an overrun. The driver sets `STARVED`, increments `starvation_events`, and
+does not arm another capture. A hardware trigger arriving then is rejected by
+the stream engine and appears in `skipped_triggers`, including the live hardware
+count while starvation is still active. The driver never reuses a `READY` or
+`USER_OWNED` bank. This is the DP-5B invariant:
+
+> Unread measurement data is never overwritten silently.
+
+`STOP` and close use the same finite drain technique as triggered cancellation;
+they do not ask the Xilinx provider to halt an armed pre-packet SG transaction.
+This avoids the provider's atomic halt poll that previously caused an RCU stall.
+After `STOP`, a new pool run is allowed only after every userspace-owned bank
+has been released or the file is closed.
+
 ## AXI DMA SG and length limits
 
 The accepted simple-mode XSA reported:
@@ -283,6 +347,23 @@ python3 \
 qcrate-dma-tools/files/qcrate-dma --help
 git diff --check
 ```
+
+DP-5B is a software-only extension over the accepted DP-5A platform. It does
+not change RTL, the Vivado block design, XSA, device tree, R5 firmware, or the
+coherent-buffer size. When the matching DP-5A hardware is already built, the
+focused compile boundary is therefore:
+
+```bash
+source /tools/Xilinx/PetaLinux/2024.2/settings.sh
+cd kv260/linux/petalinux/qcrate-kv260
+petalinux-build -c qcrate-dma
+petalinux-build -c qcrate-dma-tools
+cd /tools/fpga_projects/qcrate
+```
+
+After both recipes pass, rebuild, package, and deploy the image with the
+existing fixed-platform flow. There is no technical reason to rerun Vivado for
+this milestone.
 
 Do not build the recipes against the old XSA. The firmware recipe now rejects
 simple-mode SDT deliberately. Rebuild Vivado and run the PetaLinux `configure`
@@ -413,6 +494,7 @@ SG frame chaining  : yes
 maximum SG frames  : 255
 DSP stream mode    : yes
 triggered capture : yes
+finite bank pool  : yes
 ```
 
 First rerun the backward-compatible one-frame path. Omitting `--words` now
@@ -536,6 +618,51 @@ Each iteration re-arms the already committed R5 sequence before arming DMA.
 The shot ID increases with the sequencer's completed-shot counter, while the
 stream-local trigger count is one because stream soft reset defines a new
 capture transaction.
+
+Exercise DP-5B first with normal consumer ownership. The sequence must already
+be loaded and committed as for DP-5A:
+
+```bash
+sudo qcrate-dma capture-pool --banks 4 --shots 10
+```
+
+Each shot must report an increasing bank sequence and shot ID. Every granted
+bank must match the bit-exact DSP model, and the final status must report ten
+produced and ten consumed banks with zero skipped triggers and errors. The
+`ARMED` status returned with each granted bank proves that the worker prepared
+the next destination before waking the consumer. The test then starts shot
+N+1 before verifying and releasing bank N, directly exercising one `FILLING`
+bank alongside one `USER_OWNED` bank.
+
+Then force the no-overwrite boundary with only two banks:
+
+```bash
+sudo qcrate-dma test-pool-starvation
+```
+
+The test deliberately retains both banks, verifies explicit `STARVED` state,
+fires one trigger while no destination is armed, and checks that it is counted.
+It snapshots and rechecks the first userspace-owned bank before release, then
+rechecks the second bank, proving that neither unread payload was overwritten.
+Releasing a bank must rearm the pool and recover without unloading the module.
+
+Finally rerun the accepted synchronous and cancellation paths after the pool
+tests to prove that the extension did not change their ownership behavior:
+
+```bash
+sudo qcrate-dma capture
+sudo qcrate-dma capture-dsp
+sudo qcrate-dma test-trigger-cancel
+```
+
+The accepted KV260 run used four 16 KiB banks for ten overlapped shots. Bank
+sequences and R5 shot IDs advanced from 1 through 10, every DSP word matched,
+trigger-to-first-sample latency remained 50 ticks, queue high-water was one,
+and 163840 bytes were produced with no normal-path skips or errors. The forced
+two-bank run retained both userspace-owned payloads, entered `STARVED`, counted
+one trigger presented while unarmed, and recovered when a bank was released.
+Immediate pattern capture, four-frame DSP capture, and triggered cancellation
+then passed with zero stream stalls and no DMA or RCU-stall kernel report.
 
 For visual host-side inspection, save the accepted default capture:
 
@@ -664,8 +791,9 @@ independent 4096-word captures, an 8-frame chain ending at `0x00070fff`, a
 64-frame chain ending at `0x003f0fff`, and 100 repeated 8-frame chains without
 timeouts, stale data, loss, duplication, or frame-order errors.
 
-DP-5A is accepted separately when immediate `capture` and `capture-dsp` remain
-passing and `capture-triggered --repeat 10` proves all of the following:
+DP-5A was accepted separately after immediate `capture` and `capture-dsp`
+remained passing and `capture-triggered --repeat 10` proved all of the
+following:
 
 1. DMA and the PL source are armed before R5 starts each sequence.
 2. Exactly one trigger is accepted and no early trigger is silently consumed.
@@ -674,8 +802,9 @@ passing and `capture-triggered --repeat 10` proves all of the following:
 5. Every IQ word matches the bit-exact model for every shot.
 6. Failure or process exit leaves neither DMA nor the stream source armed.
 
-These conditions remain pending until the matching bitstream and PetaLinux
-image pass on the KV260.
+All conditions passed on the KV260. Ten consecutive captures matched the
+bit-exact model, shot IDs advanced, trigger-to-first-sample latency remained 50
+ticks, and the accepted run reported zero missed triggers and stream stalls.
 
 ## Deferred sustained-acquisition architectures
 
@@ -707,7 +836,7 @@ The following alternatives were discussed and intentionally retained:
 | Option | Appropriate use | Main benefit | Main cost or risk | Current decision |
 | --- | --- | --- | --- | --- |
 | Synchronous finite SG | Triggered shots and diagnostics | Proven ownership, recovery, and complete-buffer verification | Capture and userspace processing do not overlap | Accepted baseline |
-| Asynchronous finite-SG bank pool | Overlapped capture, processing, and UDP without silent overwrite | Explicit `FREE -> FILLING -> READY -> USER_OWNED -> FREE` ownership; can use `poll()` and read-only `mmap()` | Inter-batch rearming gap; several banks provide only milliseconds at the stress rate | Recommended first extension if UDP measurements require overlap |
+| Asynchronous finite-SG bank pool | Overlapped capture, processing, and UDP without silent overwrite | Explicit `FREE -> FILLING -> READY -> USER_OWNED -> FREE` ownership; blocking dequeue and read-only `mmap()` | Inter-batch rearming gap; several banks provide only milliseconds at the stress rate | Accepted on KV260 in DP-5B |
 | DMAEngine cyclic ring | Truly gapless, audio-like sustained acquisition | No software rearming at ring wrap | DMA may overwrite unread data; torn-read prevention, period callbacks, interrupt rate, and coalescing require careful design | Deferred experiment, not the default production path |
 | Linux IIO buffered device | A later real ADC/DDC instrument with channels, triggers, and timestamps | Standard Linux acquisition ABI and ecosystem | Framework integration is premature for the current pattern/shot model | Reconsider when real IQ channels exist |
 | Custom AXI DMA ring provider | A measured requirement unsupported by `xilinx_dma` | Full descriptor, tail-pointer, and interrupt control | Reimplements vendor DMA ownership and recovery with substantial maintenance risk | Rejected unless DMAEngine is proven inadequate |
@@ -719,12 +848,11 @@ correctness. At one callback per 4096-word frame, the stress case approaches
 Period sizing, interrupt coalescing, overwrite detection, userspace ownership,
 and stop/recovery behavior would therefore require explicit characterization.
 
-If the asynchronous finite-SG bank pool is selected later, preserve the current
-synchronous ioctls and add a separate API with `START`, `DEQUEUE`, `RELEASE`,
-`STATUS`, and `STOP`. Required counters include produced and consumed batches,
-consumer-starvation events, bytes, elapsed time, stream stalls, and recovery
-events. A free-bank shortage should pause before starting a new finite batch;
-it is not a DMA overrun and must not be reported as one.
+The asynchronous finite-SG bank pool preserves the current synchronous ioctls
+and uses the separate `START`, `DEQUEUE`, `RELEASE`, `STATUS`, and `STOP` API.
+A free-bank shortage pauses before another finite batch is armed; it is not a
+DMA overrun and is not reported as one. DP-5C will connect this ownership model
+to the sustained sender and recorder rather than adding another DMA ABI.
 
 ## References
 

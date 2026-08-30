@@ -20,6 +20,14 @@ DMA_TRANS_NOERROR = 0
 CAP_SG_CHAIN = 1 << 0
 CAP_DSP_MODE = 1 << 1
 CAP_TRIGGERED = 1 << 2
+CAP_BANK_POOL = 1 << 3
+
+POOL_START_TRIGGERED = 1 << 0
+POOL_RUNNING = 1 << 0
+POOL_ARMED = 1 << 1
+POOL_STARVED = 1 << 2
+POOL_FAULTED = 1 << 3
+POOL_STOPPING = 1 << 4
 
 TRIGGER_SEEN = 1 << 0
 FIRST_SAMPLE_TIME_VALID = 1 << 1
@@ -33,7 +41,18 @@ CAPS_STRUCT = struct.Struct("<8I")
 CAPTURE_FRAMES_STRUCT = struct.Struct("<16I")
 TRIGGERED_ARM_STRUCT = struct.Struct("<8I")
 TRIGGERED_RESULT_STRUCT = struct.Struct("<14I2Q6I")
+POOL_START_STRUCT = struct.Struct("<8IQ6I")
+POOL_DEQUEUE_STRUCT = struct.Struct("<20I5Q2I")
+POOL_RELEASE_STRUCT = struct.Struct("<2I2Q2I")
+POOL_STATUS_STRUCT = struct.Struct("<16I8Q")
+POOL_STOP_STRUCT = struct.Struct("<4IQ2I")
 WORD_STRUCT = struct.Struct("<I")
+
+assert POOL_START_STRUCT.size == 64
+assert POOL_DEQUEUE_STRUCT.size == 128
+assert POOL_RELEASE_STRUCT.size == 32
+assert POOL_STATUS_STRUCT.size == 128
+assert POOL_STOP_STRUCT.size == 32
 
 IOC_NRBITS = 8
 IOC_TYPEBITS = 8
@@ -66,6 +85,17 @@ IOC_WAIT_TRIGGERED = ioctl_code(
     IOC_READ | IOC_WRITE, 0x05, TRIGGERED_RESULT_STRUCT.size
 )
 IOC_CANCEL_TRIGGERED = ioctl_code(0, 0x06, 0)
+IOC_POOL_START = ioctl_code(
+    IOC_READ | IOC_WRITE, 0x07, POOL_START_STRUCT.size
+)
+IOC_POOL_DEQUEUE = ioctl_code(
+    IOC_READ | IOC_WRITE, 0x08, POOL_DEQUEUE_STRUCT.size
+)
+IOC_POOL_RELEASE = ioctl_code(IOC_WRITE, 0x09, POOL_RELEASE_STRUCT.size)
+IOC_POOL_STATUS = ioctl_code(IOC_READ, 0x0A, POOL_STATUS_STRUCT.size)
+IOC_POOL_STOP = ioctl_code(
+    IOC_READ | IOC_WRITE, 0x0B, POOL_STOP_STRUCT.size
+)
 
 
 @dataclass(frozen=True)
@@ -97,6 +127,10 @@ class DeviceCaps:
     @property
     def has_triggered_capture(self) -> bool:
         return bool(self.feature_flags & CAP_TRIGGERED)
+
+    @property
+    def has_bank_pool(self) -> bool:
+        return bool(self.feature_flags & CAP_BANK_POOL)
 
 
 @dataclass(frozen=True)
@@ -145,6 +179,75 @@ class TriggeredResult:
     timestamp_flags: int
     trigger_time: int
     first_sample_time: int
+
+
+@dataclass(frozen=True)
+class PoolStart:
+    frame_length_words: int
+    frame_count: int
+    stream_mode: int
+    bank_count: int
+    arm_timeout_ms: int
+    flags: int
+    bank_bytes: int
+    run_id: int
+
+
+@dataclass(frozen=True)
+class PoolBank:
+    timeout_ms: int
+    pool_flags: int
+    bank_index: int
+    bank_generation: int
+    offset_bytes: int
+    valid_bytes: int
+    frame_length_words: int
+    frame_count: int
+    stream_mode: int
+    dma_result: int
+    last_residue_bytes: int
+    stream_status: int
+    completed_frames: int
+    current_frame_id: int
+    current_sample_index: int
+    stall_cycles: int
+    trigger_shot_id: int
+    trigger_count: int
+    missed_trigger_count: int
+    timestamp_flags: int
+    run_id: int
+    bank_sequence: int
+    trigger_time: int
+    first_sample_time: int
+    completion_mono_ns: int
+
+
+@dataclass(frozen=True)
+class PoolStatus:
+    pool_flags: int
+    bank_count: int
+    bank_bytes: int
+    frame_length_words: int
+    frame_count: int
+    stream_mode: int
+    filling_bank: int
+    ready_banks: int
+    user_banks: int
+    free_banks: int
+    queue_high_water: int
+    last_error: int
+    last_trigger_shot_id: int
+    reserved0: int
+    reserved1: int
+    reserved2: int
+    run_id: int
+    produced_banks: int
+    dequeued_banks: int
+    consumed_banks: int
+    starvation_events: int
+    skipped_triggers: int
+    error_events: int
+    produced_bytes: int
 
 
 def get_info(fd: int) -> DeviceInfo:
@@ -236,6 +339,61 @@ def require_cancel_triggered(fd: int) -> None:
     fcntl.ioctl(fd, IOC_CANCEL_TRIGGERED)
 
 
+def start_pool(
+    fd: int,
+    words: int,
+    frames: int,
+    banks: int,
+    arm_timeout_ms: int,
+    stream_mode: int = 1,
+) -> PoolStart:
+    values = [0] * 15
+    values[0] = words
+    values[1] = frames
+    values[2] = stream_mode
+    values[3] = banks
+    values[4] = arm_timeout_ms
+    values[5] = POOL_START_TRIGGERED
+    raw = bytearray(POOL_START_STRUCT.pack(*values))
+    fcntl.ioctl(fd, IOC_POOL_START, raw, True)
+    unpacked = POOL_START_STRUCT.unpack(raw)
+    return PoolStart(*unpacked[:7], unpacked[8])
+
+
+def dequeue_pool(fd: int, timeout_ms: int) -> PoolBank:
+    values = [0] * 27
+    values[0] = timeout_ms
+    raw = bytearray(POOL_DEQUEUE_STRUCT.pack(*values))
+    fcntl.ioctl(fd, IOC_POOL_DEQUEUE, raw, True)
+    return PoolBank(*POOL_DEQUEUE_STRUCT.unpack(raw)[:25])
+
+
+def release_pool(fd: int, bank: PoolBank) -> None:
+    values = (
+        bank.bank_index,
+        bank.bank_generation,
+        bank.run_id,
+        bank.bank_sequence,
+        0,
+        0,
+    )
+    fcntl.ioctl(fd, IOC_POOL_RELEASE, POOL_RELEASE_STRUCT.pack(*values))
+
+
+def get_pool_status(fd: int) -> PoolStatus:
+    raw = bytearray(POOL_STATUS_STRUCT.size)
+    fcntl.ioctl(fd, IOC_POOL_STATUS, raw, True)
+    return PoolStatus(*POOL_STATUS_STRUCT.unpack(raw))
+
+
+def stop_pool(fd: int, run_id: int, timeout_ms: int) -> tuple[int, int]:
+    values = [timeout_ms, 0, 0, 0, run_id, 0, 0]
+    raw = bytearray(POOL_STOP_STRUCT.pack(*values))
+    fcntl.ioctl(fd, IOC_POOL_STOP, raw, True)
+    unpacked = POOL_STOP_STRUCT.unpack(raw)
+    return unpacked[4], unpacked[2]
+
+
 def verify_pattern(buffer: mmap.mmap, words: int) -> None:
     for sample_index in range(words):
         actual = WORD_STRUCT.unpack_from(buffer, sample_index * WORD_STRUCT.size)[0]
@@ -269,10 +427,12 @@ def verify_frames(buffer: mmap.mmap, words: int, frames: int) -> None:
                 )
 
 
-def verify_dsp(buffer: mmap.mmap, expected_words: list[int]) -> None:
+def verify_dsp(
+    buffer: mmap.mmap, expected_words: list[int], byte_offset: int = 0
+) -> None:
     for word_index, expected in enumerate(expected_words):
         actual = WORD_STRUCT.unpack_from(
-            buffer, word_index * WORD_STRUCT.size
+            buffer, byte_offset + word_index * WORD_STRUCT.size
         )[0]
         if actual != expected:
             actual_i = struct.unpack("<h", struct.pack("<H", actual & 0xFFFF))[0]
@@ -299,6 +459,7 @@ def print_info(info: DeviceInfo, caps: DeviceCaps) -> None:
         "triggered capture : "
         f"{'yes' if caps.has_triggered_capture else 'no'}"
     )
+    print(f"finite bank pool   : {'yes' if caps.has_bank_pool else 'no'}")
     if info.max_frame_words < 4096:
         print("NOTE: the current 14-bit AXI DMA length field limits frames to 4095 words")
 
@@ -716,6 +877,223 @@ def command_test_trigger_cancel(device: Path, words: int) -> None:
         os.close(fd)
 
 
+def validate_pool_bank(
+    bank: PoolBank,
+    run_id: int,
+    expected_bytes: int,
+    expected_words: list[int],
+    buffer: mmap.mmap,
+) -> None:
+    if bank.run_id != run_id:
+        raise RuntimeError(f"bank run {bank.run_id}, expected {run_id}")
+    if bank.valid_bytes != expected_bytes:
+        raise RuntimeError(
+            f"bank contains {bank.valid_bytes} bytes, expected {expected_bytes}"
+        )
+    if bank.dma_result != DMA_TRANS_NOERROR or bank.last_residue_bytes:
+        raise RuntimeError(
+            f"bank DMA={bank.dma_result}, residue={bank.last_residue_bytes}"
+        )
+    expected_flags = TRIGGER_SEEN | FIRST_SAMPLE_TIME_VALID
+    if bank.timestamp_flags != expected_flags:
+        raise RuntimeError(
+            f"bank timestamp flags 0x{bank.timestamp_flags:x}, "
+            f"expected 0x{expected_flags:x}"
+        )
+    if bank.first_sample_time < bank.trigger_time:
+        raise RuntimeError("bank first-sample timestamp precedes trigger")
+    verify_dsp(buffer, expected_words, bank.offset_bytes)
+
+
+def command_capture_pool(
+    device: Path,
+    words: int,
+    frames: int,
+    banks: int,
+    shots: int,
+    timeout_ms: int,
+    sequence_timeout_ms: int,
+    sequence_tool: Path,
+) -> None:
+    try:
+        from qcrate_dsp_reference import generate_words
+    except ImportError as exc:
+        raise RuntimeError("installed DSP reference module is unavailable") from exc
+
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    started: PoolStart | None = None
+    owned: PoolBank | None = None
+    try:
+        info = get_info(fd)
+        caps = get_caps(fd)
+        if not caps.has_bank_pool:
+            raise RuntimeError("driver does not advertise the finite bank pool")
+        if shots < 1:
+            raise ValueError("--shots must be positive")
+        total_words = words * frames
+        expected_bytes = total_words * WORD_STRUCT.size
+        expected_words = generate_words(DSP_CONFIG, DSP_TABLE_DIR, total_words)
+        with mmap.mmap(
+            fd,
+            info.buffer_bytes,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ,
+        ) as buffer:
+            started = start_pool(fd, words, frames, banks, timeout_ms)
+            previous_shot_id = 0
+            run_sequence_command(sequence_tool, sequence_timeout_ms, "arm")
+            run_sequence_command(sequence_tool, sequence_timeout_ms, "start")
+            for shot in range(1, shots + 1):
+                owned = dequeue_pool(fd, timeout_ms)
+                if owned.trigger_shot_id <= previous_shot_id:
+                    raise RuntimeError(
+                        f"shot ID {owned.trigger_shot_id} did not advance past "
+                        f"{previous_shot_id}"
+                    )
+                if not (owned.pool_flags & POOL_ARMED):
+                    raise RuntimeError("next pool bank was not armed before dequeue")
+                previous_shot_id = owned.trigger_shot_id
+
+                # Fill the next bank while userspace still owns and verifies this one.
+                if shot < shots:
+                    run_sequence_command(sequence_tool, sequence_timeout_ms, "arm")
+                    run_sequence_command(sequence_tool, sequence_timeout_ms, "start")
+                validate_pool_bank(
+                    owned, started.run_id, expected_bytes, expected_words, buffer
+                )
+                latency = owned.first_sample_time - owned.trigger_time
+                print(
+                    f"OK  pool shot {shot}/{shots}: bank={owned.bank_index}, "
+                    f"sequence={owned.bank_sequence}, shot_id={owned.trigger_shot_id}, "
+                    f"latency={latency} ticks"
+                )
+                release_pool(fd, owned)
+                owned = None
+
+            status = get_pool_status(fd)
+            if status.produced_banks != shots or status.consumed_banks != shots:
+                raise RuntimeError(
+                    f"pool counters produced/consumed={status.produced_banks}/"
+                    f"{status.consumed_banks}, expected {shots}/{shots}"
+                )
+            if status.error_events or status.skipped_triggers:
+                raise RuntimeError(
+                    f"pool errors/skips={status.error_events}/"
+                    f"{status.skipped_triggers}"
+                )
+            print(
+                f"PASS {shots} asynchronous triggered DSP shots; "
+                "every bank matched the bit-exact model"
+            )
+            print(f"run ID              : {status.run_id}")
+            print(f"banks / bank bytes  : {status.bank_count} / {status.bank_bytes}")
+            print(f"queue high-water    : {status.queue_high_water}")
+            print(f"produced bytes      : {status.produced_bytes}")
+    finally:
+        if owned is not None:
+            try:
+                release_pool(fd, owned)
+            except OSError:
+                pass
+        if started is not None:
+            try:
+                stop_pool(fd, started.run_id, timeout_ms)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def command_test_pool_starvation(
+    device: Path,
+    words: int,
+    frames: int,
+    timeout_ms: int,
+    sequence_timeout_ms: int,
+    sequence_tool: Path,
+) -> None:
+    try:
+        from qcrate_dsp_reference import generate_words
+    except ImportError as exc:
+        raise RuntimeError("installed DSP reference module is unavailable") from exc
+
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+    started: PoolStart | None = None
+    owned: list[PoolBank] = []
+    try:
+        info = get_info(fd)
+        if not get_caps(fd).has_bank_pool:
+            raise RuntimeError("driver does not advertise the finite bank pool")
+        total_words = words * frames
+        expected_bytes = total_words * WORD_STRUCT.size
+        expected_words = generate_words(DSP_CONFIG, DSP_TABLE_DIR, total_words)
+        with mmap.mmap(
+            fd,
+            info.buffer_bytes,
+            flags=mmap.MAP_SHARED,
+            prot=mmap.PROT_READ,
+        ) as buffer:
+            started = start_pool(fd, words, frames, 2, timeout_ms)
+
+            run_sequence_command(sequence_tool, sequence_timeout_ms, "arm")
+            run_sequence_command(sequence_tool, sequence_timeout_ms, "start")
+            first = dequeue_pool(fd, timeout_ms)
+            owned.append(first)
+            validate_pool_bank(
+                first, started.run_id, expected_bytes, expected_words, buffer
+            )
+            first_snapshot = bytes(
+                buffer[first.offset_bytes:first.offset_bytes + first.valid_bytes]
+            )
+
+            run_sequence_command(sequence_tool, sequence_timeout_ms, "arm")
+            run_sequence_command(sequence_tool, sequence_timeout_ms, "start")
+            second = dequeue_pool(fd, timeout_ms)
+            owned.append(second)
+            validate_pool_bank(
+                second, started.run_id, expected_bytes, expected_words, buffer
+            )
+            if not (second.pool_flags & POOL_STARVED):
+                raise RuntimeError("two-bank pool did not report explicit starvation")
+            if bytes(
+                buffer[first.offset_bytes:first.offset_bytes + first.valid_bytes]
+            ) != first_snapshot:
+                raise RuntimeError("USER_OWNED bank was overwritten during starvation")
+
+            # A third shot while no bank is armed must be counted, not captured.
+            run_sequence_command(sequence_tool, sequence_timeout_ms, "arm")
+            run_sequence_command(sequence_tool, sequence_timeout_ms, "start")
+            release_pool(fd, first)
+            owned.remove(first)
+
+            status = get_pool_status(fd)
+            if status.starvation_events < 1 or status.skipped_triggers < 1:
+                raise RuntimeError(
+                    f"starvation/skips={status.starvation_events}/"
+                    f"{status.skipped_triggers}, expected at least 1/1"
+                )
+            validate_pool_bank(
+                second, started.run_id, expected_bytes, expected_words, buffer
+            )
+            release_pool(fd, second)
+            owned.remove(second)
+            print(
+                "PASS starvation was explicit, one unarmed trigger was counted, "
+                "and neither USER_OWNED bank was overwritten"
+            )
+    finally:
+        for bank in owned:
+            try:
+                release_pool(fd, bank)
+            except OSError:
+                pass
+        if started is not None:
+            try:
+                stop_pool(fd, started.run_id, timeout_ms)
+            except OSError:
+                pass
+        os.close(fd)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", type=Path, default=DEVICE)
@@ -790,6 +1168,32 @@ def parse_args() -> argparse.Namespace:
         help="arm and cancel without a shot, then verify immediate recovery",
     )
     cancel_test.add_argument("--words", type=int, default=1024)
+
+    capture_pool = subparsers.add_parser(
+        "capture-pool",
+        help="run repeated R5-triggered DSP shots through the finite bank pool",
+    )
+    capture_pool.add_argument("--words", type=int, default=1024)
+    capture_pool.add_argument("--frames", type=int, default=4)
+    capture_pool.add_argument("--banks", type=int, default=4)
+    capture_pool.add_argument("--shots", type=int, default=10)
+    capture_pool.add_argument("--timeout-ms", type=int, default=2000)
+    capture_pool.add_argument("--sequence-timeout-ms", type=int, default=2000)
+    capture_pool.add_argument(
+        "--sequence-tool", type=Path, default=Path("/usr/bin/qcrate-sequence")
+    )
+
+    starvation_test = subparsers.add_parser(
+        "test-pool-starvation",
+        help="prove unread banks are preserved and unarmed shots are counted",
+    )
+    starvation_test.add_argument("--words", type=int, default=1024)
+    starvation_test.add_argument("--frames", type=int, default=4)
+    starvation_test.add_argument("--timeout-ms", type=int, default=2000)
+    starvation_test.add_argument("--sequence-timeout-ms", type=int, default=2000)
+    starvation_test.add_argument(
+        "--sequence-tool", type=Path, default=Path("/usr/bin/qcrate-sequence")
+    )
     return parser.parse_args()
 
 
@@ -837,6 +1241,26 @@ def main() -> int:
             )
         elif args.command == "test-trigger-cancel":
             command_test_trigger_cancel(args.device, args.words)
+        elif args.command == "capture-pool":
+            command_capture_pool(
+                args.device,
+                args.words,
+                args.frames,
+                args.banks,
+                args.shots,
+                args.timeout_ms,
+                args.sequence_timeout_ms,
+                args.sequence_tool,
+            )
+        elif args.command == "test-pool-starvation":
+            command_test_pool_starvation(
+                args.device,
+                args.words,
+                args.frames,
+                args.timeout_ms,
+                args.sequence_timeout_ms,
+                args.sequence_tool,
+            )
         else:
             raise AssertionError(args.command)
     except (OSError, RuntimeError, ValueError) as exc:
