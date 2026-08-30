@@ -2,35 +2,102 @@
 
 ## Objective
 
-This directory implements the host side of Q-Crate Data Plane v1. It receives
-one finite acquisition shot over UDP, preserves the original datagrams,
-reconstructs sample order, and publishes a raw sample file only after every
-protocol and continuity check succeeds.
+This directory implements the host side of Q-Crate Data Plane v1. It contains
+both the finite-shot Python correctness reference and the compiled sustained
+run recorder. Both preserve the original datagrams, reconstruct sample order,
+and publish sample bytes only after protocol, continuity, frame, timestamp,
+sender-status, and CRC checks succeed.
 
 ```text
-UDP socket
-   |
-   +--> packets.qcdp append-only journal
-   |
-   +--> Data Plane v1 decoder
+KV260 qcrate-streamer
           |
-          +--> sequence, duplicate, reorder, and frame checks
-          +--> STREAM_INFO and SHOT_END consistency checks
-          +--> CRC and sender-error checks
-                    |
-                    v
-          manifest.json + optional samples.bin
+          v
+  Data Plane v1 UDP
+          |
+          v
+   qcrate-recorder (C)
+     |       |       |
+     |       |       +--> run.json
+     |       +----------> shots.qidx
+     +------------------> packets.qcdp + samples.iq16
+                              |
+                              v
+                   future qcrate-analyzer GUI
 ```
 
-The implementation is the accepted finite-shot correctness reference for the
-KV260 DMA-to-UDP path. Continuous operation will require measured queue
-ownership and likely a compiled receiver using batched socket I/O; this Python
-implementation is not presented as a validated sustained-rate endpoint.
+The compiled recorder uses Linux `recvmmsg()` to drain UDP in batches and
+never waits for visualization. It is the DP-5C2 ingest boundary for repeated
+triggered acquisition. The Python receiver remains the simpler one-shot
+reference, deterministic journal replay tool, and independent implementation
+against which format decisions can be checked.
 
 The protocol itself is specified in
 [`common/data_plane/README.md`](../../common/data_plane/README.md).
 
-## Capture Bundle
+## Sustained Run Recorder
+
+Build the dependency-free C11 executable with strict compiler warnings:
+
+```bash
+python3 host/data_plane/build_recorder.py
+```
+
+Start it on the host before the KV260 sender. The output directory must not
+already exist:
+
+```bash
+build/host/qcrate-recorder \
+  --bind 192.168.1.92 \
+  --source 192.168.1.93 \
+  --port 47000 \
+  --output build/data_plane/dp5c2-run-001
+```
+
+Then transmit a finite repeated-trigger run from the board:
+
+```bash
+sudo qcrate-streamer \
+  --destination 192.168.1.92 \
+  --triggered-shots 100 \
+  --banks 4
+```
+
+Unlike the DP-5C1 packet-count check, no `socat` process or parallel
+`tcpdump` terminal is required. A successful sender terminates the run with an
+`END_OF_STREAM` heartbeat; the recorder then waits a short reordering grace
+period, closes every shot, writes `run.json` atomically, and exits.
+
+One invocation creates this run directory:
+
+```text
+dp5c2-run-001/
+  packets.qcdp     immutable arrival-order UDP journal
+  samples.iq16     concatenated payloads from complete shots only
+  shots.qidx       fixed-width per-shot publication and integrity index
+  run.json         run outcome and socket/drop counters
+```
+
+`samples.iq16` is a derived publication, not the forensic source of truth. A
+shot with a gap, collision, bad frame boundary, invalid timestamp, sender
+error, or CRC mismatch gets an `INCOMPLETE` QIDX record and contributes no
+sample bytes. Later valid shots may still be published at indexed offsets.
+Reordered packets and byte-identical duplicates are audited but are not data
+loss and do not invalidate an otherwise exact shot.
+
+The binary contracts, durability ordering, and recovery rules are specified
+in [`RUN_FORMAT.md`](RUN_FORMAT.md). Exit status is zero only for a terminal,
+uninterrupted run with at least one complete shot, no incomplete shots, no
+selected malformed packets, no sequence collision, and no kernel receive
+queue drops. Exit status 2 means evidence was preserved but the run did not
+meet that acceptance contract.
+
+The planned `qcrate-analyzer` is deliberately a separate Python process. It
+will use `shots.qidx` and `samples.iq16` for fast offline inspection and a
+later Unix notification socket for live updates. GUI latency must never enter
+the UDP receive or shot-ownership path, and the same analyzer contract can be
+ported later to a PYNQ-Z2 host.
+
+## Python Finite-Shot Bundle
 
 One receiver invocation creates one directory:
 
@@ -180,10 +247,11 @@ Run the shared C/Python protocol tests and receiver fault-injection suite:
 python3 common/data_plane/run_tests.py
 ```
 
-The suite verifies complete reconstruction, pre-metadata and in-shot
-reordering, identical and conflicting duplicates, dropped and truncated
-packets, IPv4/IPv6 journal replay, and the rule that incomplete bundles do not
-contain `samples.bin`. It is host-only and does not run Vivado or PetaLinux.
+The suite strictly compiles the recorder and verifies complete multi-shot UDP
+reconstruction, a dropped-packet quarantine, reordered and duplicate packet
+auditing, finite-shot reconstruction, malformed/truncated packets, IPv4/IPv6
+journal replay, and cross-language protocol vectors. It is host-only and does
+not run Vivado or PetaLinux.
 
 ## KV260 Integration
 
@@ -195,3 +263,16 @@ End-to-end acceptance compares this receiver's `samples.bin` against the
 bit-exact DSP model. The accepted 2026-08-29 capture reconstructed four frames
 and 4096 IQ words with no packet-integrity faults, socket drops, or model
 mismatches.
+
+The sustained recorder was accepted on 2026-08-30 with 100 triggered shots.
+It journaled all 1801 expected datagrams, published all 1,638,400 IQ payload
+bytes, and created 100 COMPLETE QIDX records with no incomplete shots,
+malformed packets, foreign traffic, duplicates, reordering, conflicts, late
+packets, continuity faults, preselection overflow, or kernel receive drops.
+
+The host requested a 16 MiB `SO_RCVBUF`, but Linux reported an actual value of
+425,984 bytes because of the system receive-buffer limit. This accepted finite
+run had zero drops, but later continuous-rate qualification must either tune
+the host's socket-buffer limits deliberately or demonstrate sufficient margin
+with the reported value. The manifest remains the authoritative evidence of
+what the kernel granted.

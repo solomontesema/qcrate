@@ -2,6 +2,7 @@
 """Run the lightweight cross-language Q-Crate data-protocol tests."""
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -86,6 +87,31 @@ def main() -> int:
             cwd=ROOT,
             stdout=subprocess.DEVNULL,
         )
+        recorder = Path(temporary) / "qcrate-recorder"
+        subprocess.run(
+            [
+                compiler,
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                f"-I{COMMON}",
+                f"-I{ROOT / 'host' / 'data_plane'}",
+                str(ROOT / "host" / "data_plane" / "qcrate_recorder.c"),
+                str(ROOT / "host" / "data_plane" / "qcrate_run_format.c"),
+                str(COMMON / "qcrate_data_protocol.c"),
+                "-o",
+                str(recorder),
+            ],
+            check=True,
+            cwd=ROOT,
+        )
+        subprocess.run(
+            [str(recorder), "--help"],
+            check=True,
+            cwd=ROOT,
+            stdout=subprocess.DEVNULL,
+        )
         control = Path(temporary) / "qcrate-control"
         subprocess.run(
             [
@@ -104,19 +130,22 @@ def main() -> int:
             check=True,
             cwd=ROOT,
         )
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            "host/data_plane/tests",
-            "-v",
-        ],
-        check=True,
-        cwd=ROOT,
-    )
+        test_environment = os.environ.copy()
+        test_environment["QCRATE_RECORDER"] = str(recorder)
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "host/data_plane/tests",
+                "-v",
+            ],
+            check=True,
+            cwd=ROOT,
+            env=test_environment,
+        )
     return 0
 
 

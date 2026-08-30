@@ -301,10 +301,12 @@ tone accepted during DSP-2B DMA testing.
 
 ### DP-5C1 Sustained Sender
 
-The compiled host recorder is DP-5C2. Until it is available, use one process to
-own the UDP port and another to capture the exact datagram count. `tcpdump`
-observes traffic but does not bind the port; running it alone makes the host
-return ICMP port-unreachable messages to the sender's connected UDP socket.
+DP-5C1 qualified sender lifecycle and packet count before the compiled
+recorder existed. The `socat` plus `tcpdump` procedure below is retained as a
+low-level network diagnostic, not as the normal acquisition workflow.
+`tcpdump` observes traffic but does not bind the port; running it alone makes
+the host return ICMP port-unreachable messages to the sender's connected UDP
+socket.
 
 In the first host terminal, bind a discard sink for the complete run:
 
@@ -362,7 +364,68 @@ With the default four-frame profile, acceptance requires:
 Finally rerun the one-shot receiver procedure above. It proves that adding the
 sustained mode did not change the already accepted compatibility path.
 
+### DP-5C2 Sustained Recorder
+
+DP-5C2 replaces both host-side diagnostic processes with one compiled,
+integrity-checking recorder. Build and start it on the development host:
+
+```bash
+python3 host/data_plane/build_recorder.py
+
+RUN=build/data_plane/dp5c2-$(date -u +%Y%m%dT%H%M%SZ)
+build/host/qcrate-recorder \
+  --bind 192.168.1.92 \
+  --source 192.168.1.93 \
+  --output "$RUN"
+```
+
+In the KV260 serial or SSH terminal, load the sequence if needed and send the
+same 100-shot acceptance run:
+
+```bash
+sudo qcrate-sequence load ~/qcrate/two_channel_demo.qseq
+sudo qcrate-streamer \
+  --destination 192.168.1.92 \
+  --triggered-shots 100 \
+  --banks 4
+```
+
+The host recorder must exit with:
+
+```text
+PASS: 100 complete, 0 incomplete shot(s), 1801 datagrams, 0 kernel drop(s)
+```
+
+Inspect the final machine-readable decision and file sizes:
+
+```bash
+python3 -m json.tool "$RUN/run.json"
+stat -c '%n %s bytes' "$RUN/samples.iq16" "$RUN/shots.qidx"
+```
+
+Expected sizes are 1,638,400 sample bytes and 12,832 QIDX bytes. The latter is
+one 32-byte header plus 100 fixed 128-byte records. The recorder also requires
+monotonic run sequence, shot IDs, and first-sample timestamps; exact frame
+coverage and sender totals; matching CRC-32; and no selected malformed,
+conflicting, source-error, or receive-overflow evidence.
+
+The host architecture and on-disk format are documented in
+[`host/data_plane/README.md`](../../../host/data_plane/README.md) and
+[`host/data_plane/RUN_FORMAT.md`](../../../host/data_plane/RUN_FORMAT.md).
+
 ## Accepted Result
+
+The DP-5C2 sustained recorder was accepted on the KV260 and development host
+on 2026-08-30. A 100-shot triggered run produced exactly 1801 datagrams, 100
+COMPLETE QIDX records, zero incomplete shots, and 1,638,400 published IQ
+payload bytes. There were no malformed, foreign, duplicate, reordered,
+conflicting, late, missing, continuity-error, preselection-overflow, or kernel
+drop reports. The resulting QIDX file was the expected 12,832 bytes.
+
+Linux clamped the requested 16 MiB receive buffer to 425,984 bytes. That is an
+accepted measured condition for this finite test, not proof of unlimited
+continuous-rate margin; the recorder records both values so later throughput
+qualification can make the host configuration explicit.
 
 The finite DSP shot was accepted on the KV260 and development host on
 2026-08-29. The receiver recorded 18 valid datagrams: one `STREAM_INFO`, 16
