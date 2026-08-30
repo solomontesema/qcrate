@@ -22,7 +22,7 @@ Tcl, configuration, recipes, and scripts.
 | Timing | Shared 64-bit 200 MHz timebase and deterministic two-channel event sequencer |
 | Sequence tooling | Standard-library Python compiler with a versioned, CRC-protected binary format |
 | DSP | Bit-accurate 200 MHz synthetic ADC, DDC, FIR decimator, AXI framing, and Python model |
-| Networking | Accepted finite-shot Data Plane v1, compiled KV260 sender, and replayable host receiver |
+| Networking | Data Plane v1, sustained KV260 sender, compiled run recorder, QIDX, and host analyzer |
 
 The pulse sequencer has passed RTL, PetaLinux, direct A53 bring-up, and final
 R5-owned upload and lifecycle testing on the KV260.
@@ -92,6 +92,7 @@ common/
 config/                   reproducible FPGA build configuration
 host/sequence_compiler/   JSON-to-QSEQ compiler and host tests
 host/data_plane/          host codec, finite-shot UDP receiver, journal, and replay
+host/analyzer/            repeated-shot QIDX reader and IQ analysis GUI
 host/dsp_model/           DSP numerical contract, generated tables, and tests
 rtl/dsp/                  portable NCO/DDC/FIR RTL and shared numerical tables
 rtl/tb/                   portable RTL self-checking testbenches
@@ -124,6 +125,7 @@ are kept beside the subsystem they describe:
 - [network baseline](kv260/linux/network/README.md)
 - [Data Plane v1 wire protocol](common/data_plane/README.md)
 - [host receiver and capture bundle](host/data_plane/README.md)
+- [repeated-shot run analyzer](host/analyzer/README.md)
 - [KV260 finite-shot UDP sender](kv260/linux/data_plane/README.md)
 - [historical Kria Ubuntu and `xmutil` bring-up](kv260/linux/README.md)
 
@@ -176,6 +178,7 @@ AMD tools:
 ```bash
 python3 -m unittest discover -s host/sequence_compiler/tests -v
 python3 -m unittest discover -s host/dsp_model/tests -v
+python3 -m unittest discover -s host/analyzer/tests -v
 python3 -m unittest kv260/linux/tests/test_qcrate_sequence_tool.py -v
 ```
 
@@ -225,11 +228,12 @@ Q-Crate is an active engineering and learning project. The KV260 fixed
 platform, APB control plane, framed DMA acquisition, FreeRTOS/OpenAMP vertical
 slice, deterministic sequencer, bit-accurate DSP model, synthesizable DDC/FIR
 chain, and model-verified DMA capture are implemented and accepted on hardware.
-The UDP wire contract, cross-language codecs, replayable host receiver, and
-compiled finite-shot KV260 sender are implemented and accepted end to end.
-The received capture passed packet-integrity, CRC, and bit-accurate DSP-model
-checks. This closes DP-4 Network Data Plane and freezes the v1 wire contract.
+The UDP wire contract, cross-language codecs, replayable receiver, sustained
+KV260 sender, compiled multi-shot recorder, and QIDX publication boundary are
+implemented and accepted end to end. The host analyzer browses repeated shots,
+quarantines incomplete measurements, and renders the captured IQ waveform,
+constellation, spectrum, integrity metadata, and exact DSP-model comparison.
 DP-5 Repeated Triggered IQ Acquisition now integrates sequencer events,
-hardware timestamps, asynchronous DMA-bank ownership, sustained transport, and
-live host analysis. A physical ADC adapter and expansion to additional
-instrumentation nodes remain future work.
+hardware timestamps, asynchronous DMA-bank ownership, sustained transport,
+durable recording, and live-refresh analysis. A physical ADC adapter and
+expansion to additional instrumentation nodes remain future work.

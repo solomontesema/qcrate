@@ -1352,7 +1352,40 @@ static int write_manifest(const struct run_state *run, bool clean)
 		"  \"format\": \"qcrate-run-v1\",\n"
 		"  \"complete\": %s,\n"
 		"  \"run_id\": \"0x%016" PRIx64 "\",\n"
-		"  \"stream_id\": \"0x%08" PRIx32 "\",\n"
+		"  \"stream_id\": \"0x%08" PRIx32 "\",\n",
+		clean ? "true" : "false", run->run_id, run->stream_id);
+	if (run->profile_valid) {
+		fprintf(manifest,
+			"  \"stream\": {\n"
+			"    \"payload_format\": %" PRIu16 ",\n"
+			"    \"sample_bytes\": %" PRIu16 ",\n"
+			"    \"frame_samples\": %" PRIu32 ",\n"
+			"    \"sample_rate_numerator\": %" PRIu64 ",\n"
+			"    \"sample_rate_denominator\": %" PRIu64 ",\n"
+			"    \"timestamp_rate_numerator\": %" PRIu64 ",\n"
+			"    \"timestamp_rate_denominator\": %" PRIu64 ",\n"
+			"    \"center_frequency_hz\": %" PRId64 ",\n"
+			"    \"channel_count\": %" PRIu16 ",\n"
+			"    \"component_bits\": %" PRIu16 ",\n"
+			"    \"fraction_bits\": %" PRIu16 ",\n"
+			"    \"timestamp_clock_id\": %" PRIu16 ",\n"
+			"    \"config_id\": \"0x%016" PRIx64 "\"\n"
+			"  },\n",
+			run->profile_header.payload_format,
+			run->profile_header.sample_bytes,
+			run->profile.frame_samples,
+			run->profile.sample_rate_numerator,
+			run->profile.sample_rate_denominator,
+			run->profile.timestamp_rate_numerator,
+			run->profile.timestamp_rate_denominator,
+			run->profile.center_frequency_hz,
+			run->profile.channel_count, run->profile.component_bits,
+			run->profile.fraction_bits,
+			run->profile.timestamp_clock_id, run->profile.config_id);
+	} else {
+		fputs("  \"stream\": null,\n", manifest);
+	}
+	fprintf(manifest,
 		"  \"terminal_received\": %s,\n"
 		"  \"run_continuity_error\": %s,\n"
 		"  \"interrupted\": %s,\n"
@@ -1372,7 +1405,6 @@ static int write_manifest(const struct run_state *run, bool clean)
 		"  \"actual_receive_buffer_bytes\": %d,\n"
 		"  \"sample_bytes_published\": %" PRIu64 "\n"
 		"}\n",
-		clean ? "true" : "false", run->run_id, run->stream_id,
 		run->terminal_seen ? "true" : "false",
 		run->run_continuity_error ? "true" : "false",
 		run->interrupted ? "true" : "false", run->complete_shots,

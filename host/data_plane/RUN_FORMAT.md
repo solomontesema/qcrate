@@ -115,8 +115,10 @@ bytes for that shot.
 The manifest is written through a temporary file and atomic rename after the
 receive loop closes. It records terminal/interruption state, complete and
 incomplete shot counts, packet diagnostics, Linux receive-queue drops, socket
-buffer sizes, and total published sample bytes. IDs are hexadecimal strings
-to preserve all integer bits in JSON consumers.
+buffer sizes, total published sample bytes, and the stream's format, exact
+rational sample/timestamp rates, center frequency, widths, timestamp clock,
+and configuration identity. IDs are hexadecimal strings to preserve all
+integer bits in JSON consumers.
 
 `complete: true` is the run acceptance decision. A missing `run.json` means
 the process did not close normally; QCRJ and committed QIDX records can still
