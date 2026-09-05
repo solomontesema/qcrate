@@ -39,9 +39,10 @@ The application provides:
 - packet integrity, kernel drop, skipped-shot, queue high-water, DMA
   stall/starvation, and host/KV260 CPU metrics when final manifests are
   available;
-- a sortable visual list of shot identity, state, timestamp, frame count, and
-  published bytes;
-- previous/next navigation and PNG export;
+- a bounded 512-record visual window containing shot identity, state,
+  timestamp, frame count, and published bytes;
+- previous/next navigation across the complete run, direct Shot ID lookup,
+  and PNG export;
 - captured I/Q time waveforms, magnitude, unwrapped phase, constellation, and
   centered complex spectrum;
 - dominant tone, level, peak/RMS magnitude, CRC, packet interval, duplicate
@@ -57,11 +58,19 @@ entire shot.
 
 ## Architecture
 
-[`qcrate_run.py`](qcrate_run.py) is the dependency-free storage reader. It
-validates QIDX magic, version, sizes, reserved fields, issue bits, shot order,
-publication state, and every sample-file extent before returning a run. It is
-usable by future command-line, notebook, web, or PYNQ interfaces without
-importing Tk or Matplotlib.
+[`qcrate_run.py`](qcrate_run.py) is the dependency-free storage reader. Its
+strict `RunBundle` reader validates QIDX magic, version, sizes, reserved
+fields, issue bits, shot order, publication state, and every sample-file
+extent before returning a complete run. Acceptance and headless reporting use
+this whole-run path.
+
+The interactive application uses the complementary `RunIndex` reader. It
+keeps file descriptors open, scans each committed QIDX record once for health
+accounting, reads later append-only records incrementally, and performs
+random-access reads with `pread`. Only 1,024 decoded records are cached and at
+most 512 are represented as Tk rows. The selected shot is the only sample
+extent loaded from `samples.iq16`. A multi-gigabyte acquisition therefore does
+not require multi-gigabyte memory or an unbounded number of GUI objects.
 
 [`qcrate_analyzer.py`](qcrate_analyzer.py) contains numerical analysis,
 plotting, headless export, and the Tk desktop application. NumPy and Matplotlib
@@ -70,8 +79,11 @@ Python installation rather than PyPI.
 
 The current live mode polls append-only QIDX once per second. It follows the
 newest shot while the operator remains at the tail; selecting an older shot
-freezes that selection for comparison. This preserves
-the recorder boundary and requires no second IPC protocol. A future event
+freezes that selection for comparison. Previous and Next cross window
+boundaries transparently, and the Shot ID field performs a binary search over
+the fixed-size index. Selection rendering is debounced so holding an arrow key
+does not calculate and redraw every intermediate spectrum. This preserves the
+recorder boundary and requires no second IPC protocol. A future event
 notification socket can reduce latency without changing QIDX or analyzer
 ownership.
 
@@ -115,7 +127,9 @@ python3 host/analyzer/qcrate_analyzer.py
 
 The application refreshes an open run automatically. Disable **Auto refresh**
 when examining a fixed bundle. **Save PNG** exports the currently selected
-shot using the same complete-shot analysis shown on screen.
+shot using the same complete-shot analysis shown on screen. Enter a decimal or
+`0x`-prefixed identity in **Shot ID** and press Enter or **Go** to navigate
+directly in a long acquisition.
 
 The first DP-5C2 acceptance bundle predates stream metadata in `run.json`.
 For that bundle the analyzer visibly reports `12.500000 MS/s (fallback)`. New
@@ -180,8 +194,10 @@ python3 -m unittest discover -s host/analyzer/tests -v
 ```
 
 The tests cover complete and incomplete records, sample extent rejection,
-legacy sample-rate fallback, IQ tone analysis, CRC agreement, and headless PNG
-generation. Visual desktop acceptance is separate because window-system
+legacy sample-rate fallback, IQ tone analysis, CRC agreement, headless PNG
+generation, append-only index refresh, partial-record publication, random
+access, binary Shot ID lookup, and bounded caching with a synthetic
+20,000-shot run. Visual desktop acceptance is separate because window-system
 availability and scaling are host properties.
 
 ## Portability

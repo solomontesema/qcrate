@@ -25,12 +25,14 @@ sys.path.insert(0, str(DSP_DIR))
 import qcrate_capture_viewer as capture_viewer  # noqa: E402
 import qcrate_dsp as dsp  # noqa: E402
 import qcrate_dsp_reference as deployed_reference  # noqa: E402
-from qcrate_run import RunBundle, RunHealth, ShotRecord  # noqa: E402
+from qcrate_run import RunBundle, RunHealth, RunIndex, ShotRecord  # noqa: E402
 
 
 DEFAULT_SAMPLE_RATE_HZ = 12_500_000.0
 DEFAULT_CONFIG = DSP_DIR / "configs" / "tone_1mhz.json"
 TABLE_MANIFEST = ROOT / "rtl" / "dsp" / "tables" / "manifest.json"
+SHOT_WINDOW_SIZE = 512
+SELECTION_DEBOUNCE_MS = 90
 
 
 @dataclass(frozen=True)
@@ -64,7 +66,7 @@ def expected_words(config_text: str, count: int) -> np.ndarray:
 
 
 def analyze_shot(
-    bundle: RunBundle,
+    bundle: RunBundle | RunIndex,
     shot: ShotRecord,
     *,
     fallback_sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
@@ -297,14 +299,20 @@ class AnalyzerApplication:
         self.root.title("Q-Crate Analyzer")
         self.root.geometry("1460x900")
         self.root.minsize(1080, 680)
-        self.bundle: RunBundle | None = None
+        self.bundle: RunIndex | None = None
         self.selected_shot_id: int | None = None
+        self.selected_record_index: int | None = None
+        self.window_start = 0
+        self.window_stop = 0
+        self.render_job: str | None = None
         self.fallback_rate = fallback_rate
         self.run_path = tk.StringVar(value="No run open")
         self.run_summary = tk.StringVar(value="Select a Q-Crate run directory")
         self.status = tk.StringVar(value="Ready")
         self.follow = tk.BooleanVar(value=True)
         self.instrument_state = tk.StringVar(value="NO RUN")
+        self.shot_id_entry = tk.StringVar()
+        self.shot_window_label = tk.StringVar(value="Records 0 of 0")
         self.session_log = session_log
         self.session_id = uuid.uuid4().hex
         self.logged_run: tuple[Path, int] | None = None
@@ -358,7 +366,10 @@ class AnalyzerApplication:
         self.health_tree.column("#0", width=130, stretch=False)
         self.health_tree.column("value", width=207, stretch=True)
         self.health_tree.pack(fill=tk.X, pady=(4, 10))
-        ttk.Label(sidebar, text="Shots", style="Header.TLabel").pack(anchor=tk.W)
+        shot_header = ttk.Frame(sidebar)
+        shot_header.pack(fill=tk.X)
+        ttk.Label(shot_header, text="Shots", style="Header.TLabel").pack(side=tk.LEFT)
+        ttk.Label(shot_header, textvariable=self.shot_window_label).pack(side=tk.RIGHT)
         shot_frame = ttk.Frame(sidebar)
         shot_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 10))
         self.shot_tree = ttk.Treeview(
@@ -382,6 +393,15 @@ class AnalyzerApplication:
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.shot_tree.tag_configure("incomplete", foreground="#991b1b")
         self.shot_tree.bind("<<TreeviewSelect>>", self.on_select)
+        jump_frame = ttk.Frame(sidebar)
+        jump_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(jump_frame, text="Shot ID").pack(side=tk.LEFT)
+        shot_entry = ttk.Entry(
+            jump_frame, textvariable=self.shot_id_entry, width=16
+        )
+        shot_entry.pack(side=tk.LEFT, padx=(6, 4), fill=tk.X, expand=True)
+        shot_entry.bind("<Return>", lambda _event: self.jump_to_shot())
+        ttk.Button(jump_frame, text="Go", command=self.jump_to_shot).pack(side=tk.RIGHT)
 
         ttk.Label(sidebar, text="Measurement", style="Header.TLabel").pack(anchor=tk.W)
         self.metadata = ttk.Treeview(
@@ -406,8 +426,8 @@ class AnalyzerApplication:
         status_bar.pack(fill=tk.X)
         self.root.bind("<Control-o>", lambda _event: self.choose_run())
         self.root.bind("<Control-s>", lambda _event: self.save_png())
-        self.root.bind("<Left>", lambda _event: self.move_selection(-1))
-        self.root.bind("<Right>", lambda _event: self.move_selection(1))
+        self.root.bind("<Left>", lambda event: self.on_navigation_key(event, -1))
+        self.root.bind("<Right>", lambda event: self.on_navigation_key(event, 1))
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.log_session("start")
         self.root.after(1000, self.periodic_refresh)
@@ -443,7 +463,9 @@ class AnalyzerApplication:
         if selected:
             self.load_run(Path(selected))
 
-    def log_session(self, event: str, bundle: RunBundle | None = None) -> None:
+    def log_session(
+        self, event: str, bundle: RunBundle | RunIndex | None = None
+    ) -> None:
         if self.session_log is None:
             return
         record: dict[str, object] = {
@@ -462,6 +484,10 @@ class AnalyzerApplication:
 
     def close(self) -> None:
         self.log_session("close", self.bundle)
+        if self.render_job is not None:
+            self.root.after_cancel(self.render_job)
+        if self.bundle is not None:
+            self.bundle.close()
         self.root.destroy()
 
     def update_health(self, health: RunHealth) -> None:
@@ -479,53 +505,69 @@ class AnalyzerApplication:
     def load_run(self, path: Path, *, preserve: bool = False) -> None:
         from tkinter import messagebox
 
-        previous = self.selected_shot_id if preserve else None
+        resolved = path.resolve()
+        same_run = bool(
+            preserve and self.bundle is not None and self.bundle.path == resolved
+        )
+        old_count = self.bundle.record_count if same_run and self.bundle else 0
+        previous_index = self.selected_record_index if same_run else None
+        follow_tail = bool(
+            previous_index is not None and old_count and previous_index == old_count - 1
+        )
         try:
-            bundle = RunBundle.open(path, allow_in_progress=True)
+            if same_run:
+                assert self.bundle is not None
+                changed = self.bundle.refresh()
+                bundle = self.bundle
+            else:
+                bundle = RunIndex.open(resolved)
+                changed = True
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             if not preserve:
                 messagebox.showerror("Cannot open run", str(exc))
             self.status.set(f"Run refresh failed: {exc}")
             return
-        old_shots = self.bundle.shots if self.bundle is not None else ()
-        follow_tail = bool(
-            preserve and old_shots and previous == old_shots[-1].shot_id
-        )
-        unchanged = self.bundle is not None and self.bundle.path == bundle.path and len(self.bundle.shots) == len(bundle.shots)
+        if not same_run:
+            if self.bundle is not None:
+                self.bundle.close()
+            self.selected_record_index = None
+            self.selected_shot_id = None
+            self.window_start = self.window_stop = 0
+            self.shot_tree.delete(*self.shot_tree.get_children())
+            self.shot_window_label.set("Records 0 of 0")
         self.bundle = bundle
         self.run_path.set(str(bundle.path))
         health = bundle.health()
         state = health.state
         self.run_summary.set(
             f"Run 0x{bundle.run_id:016x}\nStream 0x{bundle.stream_id:08x}\n"
-            f"State: {state}\nComplete: {len(bundle.complete_shots)}   "
-            f"Incomplete: {len(bundle.incomplete_shots)}"
+            f"State: {state}\nComplete: {bundle.complete_count:,}   "
+            f"Incomplete: {bundle.incomplete_count:,}"
         )
         self.update_health(health)
         run_identity = (bundle.path, bundle.run_id)
         if bundle.run_id and self.logged_run != run_identity:
             self.log_session("open_run", bundle)
             self.logged_run = run_identity
-        if unchanged:
+        if not changed:
             return
-        self.shot_tree.delete(*self.shot_tree.get_children())
-        for shot in bundle.shots:
-            self.shot_tree.insert(
-                "", "end", iid=str(shot.shot_id), text=str(shot.shot_id),
-                values=(shot.state.name.lower(), f"{shot.first_sample_timestamp:,}",
-                        shot.frame_count, f"{shot.sample_bytes:,}"),
-                tags=(() if shot.complete else ("incomplete",)),
+        if bundle.record_count:
+            selected = (
+                bundle.record_count - 1 if follow_tail
+                else previous_index
+                if previous_index is not None and previous_index < bundle.record_count
+                else bundle.record_count - 1
             )
-        shot_ids = [shot.shot_id for shot in bundle.shots]
-        selected = (
-            shot_ids[-1] if follow_tail and shot_ids
-            else previous if previous in shot_ids
-            else shot_ids[-1] if shot_ids else None
-        )
-        if selected is not None:
-            self.shot_tree.selection_set(str(selected))
-            self.shot_tree.see(str(selected))
-            self.display_shot(selected)
+            window_changed = not (
+                self.window_start <= selected < self.window_stop
+            )
+            if follow_tail or not same_run or window_changed:
+                self.populate_shot_window(selected)
+            else:
+                self.shot_window_label.set(
+                    f"Records {self.window_start + 1:,}-{self.window_stop:,} "
+                    f"of {bundle.record_count:,}"
+                )
         else:
             if bundle.run_id == 0 and bundle.manifest is None:
                 self.run_summary.set(
@@ -537,17 +579,68 @@ class AnalyzerApplication:
             else:
                 self.status.set("Run contains no committed shot records")
 
+    def populate_shot_window(self, selected: int) -> None:
+        if self.bundle is None or not self.bundle.record_count:
+            self.shot_tree.delete(*self.shot_tree.get_children())
+            self.window_start = self.window_stop = 0
+            self.shot_window_label.set("Records 0 of 0")
+            return
+        count = self.bundle.record_count
+        start = max(0, min(selected - SHOT_WINDOW_SIZE // 2,
+                           count - SHOT_WINDOW_SIZE))
+        stop = min(count, start + SHOT_WINDOW_SIZE)
+        records = self.bundle.records(start, stop)
+        self.shot_tree.delete(*self.shot_tree.get_children())
+        for ordinal, shot in enumerate(records, start):
+            self.shot_tree.insert(
+                "", "end", iid=f"r{ordinal}", text=str(shot.shot_id),
+                values=(shot.state.name.lower(), f"{shot.first_sample_timestamp:,}",
+                        shot.frame_count, f"{shot.sample_bytes:,}"),
+                tags=(() if shot.complete else ("incomplete",)),
+            )
+        self.window_start = start
+        self.window_stop = stop
+        self.shot_window_label.set(
+            f"Records {start + 1:,}-{stop:,} of {count:,}"
+        )
+        self.select_record(selected)
+
+    def select_record(self, ordinal: int) -> None:
+        if self.bundle is None or not (0 <= ordinal < self.bundle.record_count):
+            return
+        if not (self.window_start <= ordinal < self.window_stop):
+            self.populate_shot_window(ordinal)
+            return
+        iid = f"r{ordinal}"
+        if self.shot_tree.selection() != (iid,):
+            self.shot_tree.selection_set(iid)
+        self.shot_tree.see(iid)
+        shot = self.bundle.record_at(ordinal)
+        self.selected_record_index = ordinal
+        self.selected_shot_id = shot.shot_id
+        self.shot_id_entry.set(str(shot.shot_id))
+        self.schedule_display(ordinal)
+
     def on_select(self, _event: object) -> None:
         selection = self.shot_tree.selection()
         if selection:
-            self.display_shot(int(selection[0]))
+            self.select_record(int(selection[0][1:]))
 
-    def display_shot(self, shot_id: int) -> None:
+    def schedule_display(self, ordinal: int) -> None:
+        if self.render_job is not None:
+            self.root.after_cancel(self.render_job)
+        self.render_job = self.root.after(
+            SELECTION_DEBOUNCE_MS, lambda: self.display_record(ordinal)
+        )
+
+    def display_record(self, ordinal: int) -> None:
+        self.render_job = None
         if self.bundle is None:
             return
-        shot = next((item for item in self.bundle.shots if item.shot_id == shot_id), None)
-        if shot is None:
+        if ordinal != self.selected_record_index:
             return
+        shot = self.bundle.record_at(ordinal)
+        shot_id = shot.shot_id
         self.selected_shot_id = shot_id
         self.metadata.delete(*self.metadata.get_children())
         try:
@@ -579,15 +672,34 @@ class AnalyzerApplication:
             self.status.set(f"Shot {shot_id} analysis failed: {exc}")
 
     def move_selection(self, delta: int) -> None:
-        children = self.shot_tree.get_children()
-        if not children:
+        if self.bundle is None or not self.bundle.record_count:
             return
-        selection = self.shot_tree.selection()
-        current = children.index(selection[0]) if selection and selection[0] in children else 0
-        target = max(0, min(len(children) - 1, current + delta))
-        self.shot_tree.selection_set(children[target])
-        self.shot_tree.see(children[target])
-        self.display_shot(int(children[target]))
+        current = self.selected_record_index
+        if current is None:
+            current = self.bundle.record_count - 1
+        target = max(0, min(self.bundle.record_count - 1, current + delta))
+        self.select_record(target)
+
+    def on_navigation_key(self, event: object, delta: int) -> str | None:
+        widget = getattr(event, "widget", None)
+        if widget is not None and widget.winfo_class() in ("Entry", "TEntry"):
+            return None
+        self.move_selection(delta)
+        return "break"
+
+    def jump_to_shot(self) -> None:
+        if self.bundle is None:
+            return
+        try:
+            shot_id = int(self.shot_id_entry.get().strip(), 0)
+        except ValueError:
+            self.status.set("Shot ID must be a decimal or 0x-prefixed integer")
+            return
+        ordinal = self.bundle.find_shot_id(shot_id)
+        if ordinal is None:
+            self.status.set(f"Shot {shot_id} is not present in this run")
+            return
+        self.select_record(ordinal)
 
     def save_png(self) -> None:
         from tkinter import filedialog

@@ -94,6 +94,11 @@ class RunReaderTests(unittest.TestCase):
             self.assertEqual(health.complete_shots, 2)
             self.assertEqual(health.incomplete_shots, 1)
             self.assertFalse(health.integrity_ok)
+            with qcrate_run.RunIndex.open(root) as catalog:
+                self.assertEqual(catalog.health(), health)
+                self.assertEqual(
+                    catalog.read_samples(catalog.record_at(2)), bytes(range(16, 32))
+                )
 
     def test_live_reader_accepts_index_before_first_datagram(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -150,6 +155,57 @@ class RunReaderTests(unittest.TestCase):
             self.assertEqual(health.token_queue_high_water, 2)
             self.assertEqual(health.dma_stall_cycles, 7)
             self.assertEqual(health.sender_cpu_percent, 4.25)
+
+    def test_random_access_catalog_refreshes_only_committed_records(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            root.mkdir()
+            (root / "samples.iq16").write_bytes(bytes(range(48)))
+            initial = [
+                index_record(shot_id, offset=(shot_id - 1) * 16)
+                for shot_id in range(1, 3)
+            ]
+            index_path = root / "shots.qidx"
+            index_path.write_bytes(index_header() + b"".join(initial))
+            with qcrate_run.RunIndex.open(root, cache_records=4) as catalog:
+                self.assertEqual(catalog.record_count, 2)
+                self.assertEqual(catalog.complete_count, 2)
+                self.assertEqual(catalog.record_at(1).shot_id, 2)
+                self.assertEqual(catalog.find_shot_id(2), 1)
+                self.assertIsNone(catalog.find_shot_id(9))
+
+                third = index_record(3, offset=32)
+                with index_path.open("ab") as stream:
+                    stream.write(third[:17])
+                self.assertFalse(catalog.refresh())
+                self.assertEqual(catalog.record_count, 2)
+                with index_path.open("ab") as stream:
+                    stream.write(third[17:])
+                self.assertTrue(catalog.refresh())
+                self.assertEqual(catalog.record_count, 3)
+                self.assertEqual(catalog.record_at(2).shot_id, 3)
+                self.assertEqual(catalog.health().complete_shots, 3)
+
+    def test_large_catalog_keeps_a_bounded_record_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            root.mkdir()
+            count = 20_000
+            samples = root / "samples.iq16"
+            with samples.open("wb") as stream:
+                stream.truncate(count * 4)
+            with (root / "shots.qidx").open("wb") as stream:
+                stream.write(index_header())
+                for ordinal in range(count):
+                    stream.write(index_record(
+                        ordinal + 100, offset=ordinal * 4, sample_bytes=4
+                    ))
+            with qcrate_run.RunIndex.open(root, cache_records=32) as catalog:
+                self.assertEqual(catalog.record_count, count)
+                self.assertEqual(catalog.complete_count, count)
+                self.assertEqual(catalog.record_at(count - 1).shot_id, count + 99)
+                self.assertEqual(catalog.find_shot_id(10_099), 9_999)
+                self.assertLessEqual(catalog.cache_entries, 32)
 
 
 if __name__ == "__main__":
