@@ -38,12 +38,13 @@ Current source scope:
   userspace work without overwriting unread data;
 - backward-compatible one-frame capture and repeat testing.
 
-Cyclic rings, indefinite acquisition, multiple concurrent consumers, and
-sustained network streaming remain later milestones. `capture --repeat 100`
-still starts 100 independent one-frame commands. `capture-frames --frames N`
-starts the stream once and receives frame IDs `0` through `N-1` through a
-pre-armed SG chain. The bank-pool API is separate, so these accepted synchronous
-interfaces retain their original behavior.
+Cyclic rings, indefinite untriggered acquisition, and multiple concurrent
+consumers remain outside the accepted interface. Sustained triggered network
+acquisition is implemented above the asynchronous finite-SG bank pool without
+changing the synchronous regression paths. `capture --repeat 100` still starts
+100 independent one-frame commands. `capture-frames --frames N` starts the
+stream once and receives frame IDs `0` through `N-1` through a pre-armed SG
+chain.
 
 Status:
 
@@ -848,11 +849,12 @@ correctness. At one callback per 4096-word frame, the stress case approaches
 Period sizing, interrupt coalescing, overwrite detection, userspace ownership,
 and stop/recovery behavior would therefore require explicit characterization.
 
-The asynchronous finite-SG bank pool preserves the current synchronous ioctls
-and uses the separate `START`, `DEQUEUE`, `RELEASE`, `STATUS`, and `STOP` API.
-A free-bank shortage pauses before another finite batch is armed; it is not a
-DMA overrun and is not reported as one. DP-5C will connect this ownership model
-to the sustained sender and recorder rather than adding another DMA ABI.
+The asynchronous finite-SG bank pool preserves the synchronous ioctls and uses
+the separate `START`, `DEQUEUE`, `RELEASE`, `STATUS`, and `STOP` API. A
+free-bank shortage pauses before another finite batch is armed; it is not a DMA
+overrun and is not reported as one. DP-5C and DP-5D connected this ownership
+model to the sustained sender and recorder and accepted it without adding
+another DMA ABI.
 
 ## References
 

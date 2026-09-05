@@ -1,0 +1,33 @@
+{
+  "format": "qcrate-release-manifest-v1",
+  "release": "v1.0.0",
+  "title": "Networked Pulsed-IQ Analyzer",
+  "source_ref": "v1.0.0",
+  "platform": {
+    "board": "AMD Kria KV260",
+    "device": "xck26-sfvc784-2LV-c",
+    "vivado": "2024.2",
+    "vitis": "2024.2",
+    "petalinux": "2024.2",
+    "petalinux_esdk_update": 1,
+    "bsp": "xilinx-kv260-starterkit-v2024.2-12072024.bsp"
+  },
+  "accepted_reference_application": {
+    "name": "Networked Pulsed-IQ Analyzer v1",
+    "status": "ACCEPTED",
+    "evidence": "host/acceptance/evidence/dp5d-kv260-accepted.json",
+    "evidence_sha256": "a15e3900d708062950970378b05158bf6e73dccd9785d2367f2157b5593a0a79",
+    "report_image": "host/acceptance/images/dp5d-kv260-accepted.png",
+    "report_image_sha256": "76748b93c5358d44a303962a077bc81923d8ca9b8182b42e9003441cad5784d2"
+  },
+  "compatibility": {
+    "udp_data_plane": 1,
+    "qidx_run_index": 1,
+    "sequence_format": 1
+  },
+  "artifact_policy": {
+    "source_release": true,
+    "generated_fpga_and_os_artifacts_in_git": false,
+    "raw_acceptance_run_in_git": false
+  }
+}

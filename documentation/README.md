@@ -4,11 +4,10 @@ This directory contains the Git-tracked source of the Q-Crate Design Guide.
 
 ## Build the PDF
 
-On Ubuntu, install Pandoc, XeLaTeX, and Inkscape if they are not already
-available:
+On Ubuntu, install Pandoc and XeLaTeX if they are not already available:
 
 ```bash
-sudo apt install pandoc texlive-xetex inkscape
+sudo apt install pandoc texlive-xetex
 ```
 
 Then run:
@@ -23,8 +22,8 @@ The generated file is written to:
 output/Q-Crate_Design_Guide_v0.1.pdf
 ```
 
-The Markdown remains the canonical source. The SVG diagram is used directly by
-Git hosting and converted automatically during the PDF build.
+The Markdown remains the canonical source. Its architecture section references
+the tracked KV260 block-design image used by both Git hosting and the PDF build.
 
 ## Updating the guide
 

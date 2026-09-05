@@ -494,20 +494,20 @@ python3 host/data_plane/qcrate_receiver.py replay \
   --output build/data_plane/kv260-dsp-shot-replay
 ```
 
-## Next Boundary
+## Accepted Release Boundary
 
-DP-4 Network Data Plane is complete, and the Data Plane v1 wire contract is
-frozen. The next milestone is DP-5 Repeated Triggered IQ Acquisition for the
-Networked Pulsed-IQ Analyzer reference application.
+DP-4 Network Data Plane and DP-5 Repeated Triggered IQ Acquisition are complete.
+Data Plane v1 is frozen by Q-Crate v1.0.0 and now carries both finite diagnostic
+captures and sustained Networked Pulsed-IQ Analyzer runs.
 
-DP-5 preserves this finite-shot path and adds a separate asynchronous finite-SG
-bank pool. Its invariant is explicit:
+The asynchronous finite-SG bank pool preserves this invariant:
 
 ```text
 FREE -> FILLING -> READY -> USER_OWNED -> FREE
 ```
 
 No unread measurement bank may be overwritten. When no free bank exists, the
-system stops arming new acquisition work and reports starvation or skipped
-triggers. Queue depth, CPU cost, socket drops, throughput, receiver restart,
-and cable-removal recovery must be measured before DP-5 is accepted.
+system stops arming new acquisition work and reports backpressure or skipped
+triggers. The accepted five-minute DP-5D run records queue depth, CPU cost,
+socket drops, throughput, receiver/analyzer restart, and cable-removal recovery
+in the [instrument acceptance evidence](../../../host/acceptance/README.md).

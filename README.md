@@ -1,254 +1,218 @@
 # Q-Crate
 
-Q-Crate is a reproducible FPGA instrumentation platform built around the AMD
-Kria KV260. It combines deterministic pulse control, framed AXI4-Stream data,
-scatter-gather DMA, embedded Linux, and a FreeRTOS/OpenAMP control service.
+**A reproducible FPGA instrumentation platform for deterministic pulse control,
+triggered IQ acquisition, heterogeneous processing, and integrity-preserving
+network transport.**
 
-The repository is organized as source rather than a checked-in Vivado or Vitis
-workspace. Vivado projects, generated software platforms, PetaLinux build
-trees, bitstreams, XSA files, and SD-card images are rebuilt from tracked RTL,
-Tcl, configuration, recipes, and scripts.
+Q-Crate combines an AMD Kria KV260, custom SystemVerilog, FreeRTOS on Cortex-R5,
+PetaLinux on Cortex-A53, scatter-gather DMA, a versioned UDP data plane, and host
+analysis software. The repository contains source and automation rather than a
+checked-in Vivado workspace, so the hardware and software platform can be
+rebuilt and audited from Git.
 
-## Current capabilities
+The first formal release is **Q-Crate v1.0.0**, which closes the first reference
+application: **Networked Pulsed-IQ Analyzer v1**. See the
+[v1.0.0 release notes](releases/v1.0.0.md).
 
-| Area | Implemented capability |
-|---|---|
-| Control plane | APB fabric with system, stream, interrupt, and sequencer register pages |
-| Clocking | 100 MHz control domain and 200 MHz stream/timing domain with explicit CDC |
-| Streaming | Backpressure-correct framed counter and complex DSP sources |
-| DMA | Linux DMAEngine client with coherent buffers and finite scatter-gather frame chains |
-| Linux platform | Fixed PetaLinux platform generated from the accepted KV260 XSA |
-| Heterogeneous control | Linux `remoteproc` plus VirtIO RPMsg to R5-0 FreeRTOS/OpenAMP |
-| Timing | Shared 64-bit 200 MHz timebase and deterministic two-channel event sequencer |
-| Sequence tooling | Standard-library Python compiler with a versioned, CRC-protected binary format |
-| DSP | Bit-accurate 200 MHz synthetic ADC, DDC, FIR decimator, AXI framing, and Python model |
-| Networking | Data Plane v1, sustained KV260 sender, compiled run recorder, QIDX, and host analyzer |
+## Accepted On KV260
 
-The pulse sequencer has passed RTL, PetaLinux, direct A53 bring-up, and final
-R5-owned upload and lifecycle testing on the KV260.
-
-## Reference application
-
-The first integrated Q-Crate application is the **Networked Pulsed-IQ
-Analyzer**. It is a deterministic pulse-and-acquisition instrument in which R5
-supervises the PL sequence, the shared hardware timebase identifies triggered
-IQ measurements, Linux owns DMA and network policy, and a host reconstructs and
-analyses each shot.
-
-The current signal source and channel are implemented in RTL. A future physical
-ADC can replace that source while preserving the timing, control, DMA, Data
-Plane v1, recording, and analysis contracts. This makes the demonstration
-relevant to pulsed radar, LiDAR, quantum readout, ultrasound, and laboratory
-response measurement without claiming a completed analogue front end.
-
-Networked Pulsed-IQ Analyzer v1 is **ACCEPTED** on real KV260 hardware. Its
-five-minute qualification captured 108,167 complete measurements and verified
-443,052,032 IQ words against the bit-accurate model with no incomplete shots,
-packet loss, skipped triggers, DMA errors, or model mismatches. Analyzer and
-receiver restart plus Ethernet disconnect/recovery tests also passed without
-publishing silently corrupted COMPLETE data.
+Networked Pulsed-IQ Analyzer v1 is **ACCEPTED** on real KV260 hardware using the
+deterministic synthetic sampled-signal source included in the RTL. A five-minute
+run exercised hardware triggering, DSP, DMA-bank ownership, sustained UDP
+transport, durable recording, exact reconstruction, and host analysis.
 
 ![Accepted Q-Crate Networked Pulsed-IQ Analyzer](host/acceptance/images/dp5d-kv260-accepted.png)
 
-The normalized [DP-5D evidence](host/acceptance/evidence/dp5d-kv260-accepted.json)
-and [acceptance procedure](host/acceptance/README.md) preserve the measured
-result and its reproduction steps.
+| Qualification result | Measured value |
+|---|---:|
+| Sustained acquisition | 300.001179 seconds |
+| Complete / incomplete shots | 108,167 / 0 |
+| IQ words checked against the bit-accurate model | 443,052,032 |
+| Reference mismatches | 0 |
+| Sample / UDP payload rate | 47.210 / 50.898 Mb/s |
+| Missing, malformed, conflicting, or kernel-dropped packets | 0 |
+| Missed/skipped triggers and DMA errors | 0 |
+| Analyzer restart | PASS |
+| Receiver restart | PASS |
+| Ethernet disconnect and fresh-run recovery | PASS |
 
-## Validated DSP capture
+The tracked [machine-readable evidence](host/acceptance/evidence/dp5d-kv260-accepted.json)
+and [acceptance procedure](host/acceptance/README.md) preserve the exact result
+and its reproduction criteria. Interrupted acquisition is never promoted as a
+complete measurement, and recovery starts a fresh run rather than concealing a
+gap.
 
-![Q-Crate KV260 DSP-2B capture](host/dsp_model/images/kv260_dsp2b_capture.png)
+## Platform And Reference Application
 
-The KV260 DSP-2B path runs a deterministic 200 MS/s synthetic ADC through a
-29 MHz complex downconverter and a 217-tap decimate-by-16 FIR, then transfers
-the 12.5 MS/s Q1.15 IQ stream to DDR through scatter-gather DMA. The displayed
-4096-word hardware capture matched the bit-accurate Python model exactly and
-shows the expected positive 1 MHz translated tone. The modeled-input versus
-captured-output interpretation, binary format, FFT resolution, and complete
-reproduction procedure are documented in the
-[DSP model and capture viewer](host/dsp_model/README.md).
+**Q-Crate** is the reusable instrumentation platform. It supplies deterministic
+timing, processor ownership boundaries, sample transport, persistent run
+formats, integrity checks, and reproducible build/deployment flows.
+
+**Networked Pulsed-IQ Analyzer** is the first application built on that
+platform. It uses an R5-supervised pulse sequence to trigger coherent IQ shots,
+moves them through Linux-owned DMA buffers, sends them over Data Plane v1, and
+records and displays waveform, magnitude, phase, constellation, spectrum, and
+instrument health on a host.
+
+The distinction is deliberate. Future instruments can replace the signal
+source or host interpretation while retaining the platform contracts.
 
 ## Architecture
 
 ```text
-Development host
-  Python sequence compiler
-  Vivado/Vitis/PetaLinux batch flows
-              |
-              v
-KV260 A53 Linux
-  userspace tools and DMA client driver
-              |
-              +---- AXI DMA ----> DDR capture buffers
-              |
-              +---- RPMsg ----> R5-0 FreeRTOS control service
-                                      |
-                                      v
-                         100 MHz APB control plane
-                                      |
-                                      v
-                         200 MHz stream/timing plane
-                           AXI stream + sequencer
+Host control
+  sequence compiler and acceptance orchestration
+                    |
+                    | SSH + RPMsg control
+                    v
++--------------------------- KV260 / K26 ---------------------------+
+|                                                                   |
+|  Cortex-A53 / PetaLinux              Cortex-R5 / FreeRTOS         |
+|  DMA ownership, DDR, UDP  <---RPMsg-- sequence validation/control |
+|              ^                                  |                 |
+|              | AXI DMA S2MM                     | APB             |
+|              |                                  v                 |
+|  200 MHz PL: timebase + sequencer + synthetic source + DDC/FIR    |
+|              |                                                    |
+|              +---- framed 12.5 MS/s Q1.15 IQ stream --------------+
++-------------------------------------------------------------------+
+                    |
+                    | Q-Crate Data Plane v1 / UDP
+                    v
+Host data path
+  compiled recorder -> immutable journal + QIDX -> analyzer/acceptance
 ```
 
-Linux owns DMA descriptors, capture buffers, and non-real-time policy. R5-0
-owns bounded real-time sequencer validation and lifecycle commands. The PL
-executes pulse timing and stream generation independently of Linux scheduling.
+The responsibility split is part of the design:
 
-## Repository layout
+- **Programmable logic** owns clock-cycle timing, stream handshakes, and DSP.
+- **R5-0 with FreeRTOS** owns bounded sequence validation and lifecycle control.
+- **A53 Linux** owns DMA descriptors, coherent buffers, networking, and system
+  policy.
+- **The host** owns durable recording, replay, numerical verification, and
+  visualization.
+
+Linux never generates sample-level timing, the R5 never copies bulk sample
+data, and the analyzer never participates in the UDP ingest critical path.
+
+## Reusable Capabilities
+
+| Area | Implemented and hardware-accepted capability |
+|---|---|
+| Reproducible FPGA build | Exported block-design Tcl, tracked RTL/XDC inputs, staged Vivado batch flow, bitstream and XSA export |
+| Control plane | APB fabric with system, stream, interrupt, and sequencer pages behind the PS AXI path |
+| Clocking and CDC | 100 MHz control and 200 MHz stream/timing domains with explicit command, status, and event crossings |
+| Deterministic timing | Shared 64-bit 200 MHz timebase and two-channel event sequencer |
+| Heterogeneous control | Versioned RPMsg protocol, Linux `remoteproc`, and R5-0 FreeRTOS/OpenAMP service |
+| DSP | Deterministic 200 MS/s synthetic source, 29 MHz complex DDC, 217-tap decimate-by-16 FIR, and bit-accurate Python model |
+| DMA ownership | Linux DMAEngine client, finite scatter-gather chains, and asynchronous finite-SG bank pool |
+| Data integrity | `FREE -> FILLING -> READY -> USER_OWNED -> FREE`; unread measurements are never silently overwritten |
+| Network data plane | Frozen Data Plane v1 header, direct DMA-buffer packetization, sequence/loss detection, and run identity |
+| Durable acquisition | Compiled host recorder, immutable datagram journal, QIDX publication boundary, and atomic run manifests |
+| Analysis and acceptance | Bounded-memory live GUI, headless reports, exact model comparison, soak tests, and disruption recovery |
+
+## Scope Of v1.0.0
+
+This release validates the complete **digital** instrumentation path. Its input
+is a deterministic synthetic ADC/channel model implemented in RTL, not a
+physical converter.
+
+Q-Crate v1.0.0 does **not** claim:
+
+- a completed ADC, DAC, RF, or analogue front end;
+- measured ENOB, SNR, SFDR, clock jitter, input bandwidth, or calibrated volts;
+- JESD204, LVDS converter, PCIe, or MicroTCA backplane integration;
+- product safety, regulatory compliance, or production deployment support.
+
+This boundary is important: the release proves that accepted digital samples
+retain deterministic timing, ownership, identity, and integrity from PL to the
+host. Physical measurement accuracy remains a future hardware-specific
+milestone.
+
+## Explore The Repository
+
+| Start here | Contents |
+|---|---|
+| [Q-Crate Design Guide](documentation/Q-CRATE_DESIGN_GUIDE.md) | Architecture and DSP concepts; document edition 0.1 |
+| [KV260 platform](kv260/README.md) | Hardware/software ownership, clocks, and deployment stages |
+| [KV260 hardware](kv260/hw/README.md) | Block design, RTL tests, sequencing, reset, and ILA |
+| [PetaLinux platform](kv260/linux/petalinux/README.md) | Fixed-platform configuration, build, packaging, SD deployment, and first boot |
+| [DMA acquisition](kv260/linux/dma/README.md) | DMAEngine client, SG chains, triggered capture, and bank ownership |
+| [R5/OpenAMP](kv260/linux/openamp/README.md) | Vitis firmware, remoteproc, RPMsg ABI, and R5 ownership |
+| [DSP RTL](rtl/dsp/README.md) | NCO, synthetic source, DDC, FIR, framing, and verification |
+| [DSP model](host/dsp_model/README.md) | Numerical contract, bit-accurate model, vectors, and capture viewer |
+| [Data Plane v1](common/data_plane/README.md) | Frozen binary UDP contract and cross-language codecs |
+| [Run format and recorder](host/data_plane/README.md) | Journal, QIDX, replay, and compiled sustained recorder |
+| [Analyzer](host/analyzer/README.md) | Live/offline IQ analysis and bounded-memory long-run navigation |
+| [Instrument acceptance](host/acceptance/README.md) | Five-minute soak, fault tests, evidence, and PASS criteria |
+
+The repository layout follows those ownership boundaries:
 
 ```text
-common/
-  dma/                   shared Linux DMA userspace ABI
-  data_plane/            shared C/Python UDP wire contract and codec tests
-  protocol/              shared A53/R5 RPMsg wire ABI
-  sequence/              shared deterministic sequence format
-config/                   reproducible FPGA build configuration
-host/sequence_compiler/   JSON-to-QSEQ compiler and host tests
-host/data_plane/          host codec, finite-shot UDP receiver, journal, and replay
-host/analyzer/            repeated-shot QIDX reader and IQ analysis GUI
-host/acceptance/          soak, recovery, telemetry, and instrument verdict tooling
-host/dsp_model/           DSP numerical contract, generated tables, and tests
-rtl/dsp/                  portable NCO/DDC/FIR RTL and shared numerical tables
-rtl/tb/                   portable RTL self-checking testbenches
-kv260/hw/
-  bd/                     exported block-design Tcl
-  rtl/                    handwritten SystemVerilog
-  tb/                     self-checking SystemVerilog testbenches
-kv260/linux/
-  data_plane/             compiled finite DMA-to-UDP sender and acceptance
-  dma/                    DMA architecture and acceptance notes
-  network/                Ethernet baseline tooling
-  openamp/                Linux/R5 OpenAMP architecture and client
-  petalinux/              tracked project specification and deployment flow
-kv260/r5_freertos/        R5-0 FreeRTOS RPMsg service
-kv260/vitis/              reproducible Vitis firmware flow
-scripts/                  Vivado and packaging entry points
+common/             shared C wire formats and userspace ABIs
+config/             reproducible FPGA build configuration
+rtl/                portable DSP RTL and self-checking testbenches
+kv260/hw/           KV260 block design, integration RTL, and hardware tests
+kv260/r5_freertos/  R5 real-time service
+kv260/vitis/        reproducible Vitis platform/application flow
+kv260/linux/        PetaLinux, kernel module, target tools, DMA, and networking
+host/               compilers, models, receiver/recorder, analyzer, acceptance
+documentation/      public design guide source and generated edition
+scripts/            Vivado and packaging entry points
 ```
 
-Start with [the KV260 platform overview](kv260/README.md). Detailed procedures
-are kept beside the subsystem they describe:
+## Build And Test Entry Points
 
-- [hardware, RTL simulation, clocks, reset, and ILA](kv260/hw/README.md)
-- [fixed PetaLinux build and SD-card deployment](kv260/linux/petalinux/README.md)
-- [DMAEngine capture and scatter-gather DMA](kv260/linux/dma/README.md)
-- [R5 FreeRTOS and OpenAMP](kv260/linux/openamp/README.md)
-- [sequence binary format](common/sequence/README.md)
-- [sequence compiler](host/sequence_compiler/README.md)
-- [DSP-0 numerical contract and bit-accurate model](host/dsp_model/README.md)
-- [portable NCO, DDC mixer, and FIR decimator](rtl/dsp/README.md)
-- [network baseline](kv260/linux/network/README.md)
-- [Data Plane v1 wire protocol](common/data_plane/README.md)
-- [host receiver and capture bundle](host/data_plane/README.md)
-- [repeated-shot run analyzer](host/analyzer/README.md)
-- [DP-5D instrument acceptance](host/acceptance/README.md)
-- [KV260 finite-shot UDP sender](kv260/linux/data_plane/README.md)
-- [historical Kria Ubuntu and `xmutil` bring-up](kv260/linux/README.md)
+The accepted toolchain is Vivado, Vitis, and PetaLinux **2024.2**, targeting the
+KV260/K26 part `xck26-sfvc784-2LV-c`. Python 3.10 or newer is used for host
+automation and models. AMD tools and the KV260 BSP must be installed separately.
 
-## Toolchain
+Run host-side tests without AMD tools:
 
-The accepted tool versions are:
+```bash
+python3 common/data_plane/run_tests.py
+python3 -m unittest discover -s host/dsp_model/tests -v
+python3 -m unittest discover -s host/analyzer/tests -v
+python3 -m unittest discover -s host/acceptance/tests -v
+```
 
-- Vivado, Vitis, and PetaLinux 2024.2
-- KV260/K26 target, part `xck26-sfvc784-2LV-c`
-- Python 3.10 or newer
-- Verilator for lightweight RTL tests
-- a Linux development host
-
-AMD tools and the KV260 BSP are not redistributed by this repository. Install
-them separately and accept their licenses before running the complete flow.
-
-The default [build configuration](config/build.json) expects the AMD tools
-under `/tools/Xilinx`. Edit `vivado_settings` and `vitis_settings` when your
-installation uses a different location. Build and artifact paths are resolved
-relative to the repository root.
-
-## Hardware build
-
-Preview the command without starting Vivado:
+Preview the hardware build command without starting Vivado:
 
 ```bash
 python3 scripts/build.py --stage project --dry-run
 ```
 
-Create the Vivado project and block design only:
-
-```bash
-python3 scripts/build.py --stage project
-```
-
-Run a clean end-to-end hardware build through bitstream and XSA export:
+Run the clean Vivado build through bitstream and XSA export:
 
 ```bash
 python3 scripts/build.py --stage all
 ```
 
-Individual `synth`, `impl`, `bitstream`, and `export` stages can reuse valid
-completed runs. `all` intentionally recreates the complete hardware build.
-
-## Host tests
-
-The host numerical, sequence compiler, and target protocol tests do not require
-AMD tools:
-
-```bash
-python3 -m unittest discover -s host/sequence_compiler/tests -v
-python3 -m unittest discover -s host/dsp_model/tests -v
-python3 -m unittest discover -s host/analyzer/tests -v
-python3 -m unittest kv260/linux/tests/test_qcrate_sequence_tool.py -v
-```
-
-The SystemVerilog testbenches cover APB, CDC, stream generation, sequencer
-execution, and the integrated sequencer subsystem. Exact Verilator and XSim
-commands are documented in [the hardware README](kv260/hw/README.md).
-
-## Software platform
-
-The normal dependency order is:
-
-```text
-Vivado bitstream/XSA
-        |
-        +--> Vitis R5-0 FreeRTOS firmware
-        |
-        +--> PetaLinux hardware configuration
-                    |
-                    v
-          root filesystem, boot firmware,
-          bitstream, kernel, device tree, and SD image
-```
-
-Build and stage the R5 firmware after exporting the XSA:
+Build the R5 firmware after exporting the XSA:
 
 ```bash
 python3 kv260/vitis/vitis_flow.py all
 ```
 
-The PetaLinux flow provides separate `configure`, `build`, `package`, `deploy`,
-and `finalize` actions. SD-card deployment is destructive and requires an
-explicit whole-device path. Follow the audited procedure in
-[the PetaLinux README](kv260/linux/petalinux/README.md), including its device
-identity and first-boot checks.
+PetaLinux configuration, image creation, boot-firmware packaging, destructive
+SD deployment, and first-boot acceptance are intentionally documented in the
+[PetaLinux procedure](kv260/linux/petalinux/README.md) rather than duplicated
+here.
 
-## Generated files
+## Reproducibility And Release Policy
 
-Generated workspaces and artifacts are intentionally ignored. In particular,
-do not commit `.Xil`, Vivado project directories, PetaLinux temporary/build
-trees, Vitis workspaces, bitstreams, XSA files, ELF files, or SD-card images.
-Use release artifacts or external storage for reproducible binary releases and
-publish matching source revisions and checksums.
+Generated Vivado projects, Vitis workspaces, PetaLinux/Yocto build trees,
+bitstreams, XSA files, ELF files, SD images, and multi-gigabyte acquisition runs
+are not committed. They are rebuilt from tracked inputs or retained as external
+test artifacts. The source tag, tool versions, accepted evidence hashes, and
+artifact policy are recorded in the
+[v1.0.0 release manifest](releases/v1.0.0-manifest.json).
 
-## Project status
+Data Plane v1 and QIDX v1 are compatibility boundaries. Existing layouts,
+endianness, sizes, and field meanings must not be reinterpreted silently; an
+incompatible change requires a new protocol or format version.
 
-Q-Crate is an active engineering and learning project. The KV260 fixed
-platform, APB control plane, framed DMA acquisition, FreeRTOS/OpenAMP vertical
-slice, deterministic sequencer, bit-accurate DSP model, synthesizable DDC/FIR
-chain, and model-verified DMA capture are implemented and accepted on hardware.
-The UDP wire contract, cross-language codecs, replayable receiver, sustained
-KV260 sender, compiled multi-shot recorder, and QIDX publication boundary are
-implemented and accepted end to end. The host analyzer browses repeated shots,
-quarantines incomplete measurements, and renders the captured IQ waveform,
-constellation, spectrum, integrity metadata, and exact DSP-model comparison.
-DP-5 Repeated Triggered IQ Acquisition now integrates sequencer events,
-hardware timestamps, asynchronous DMA-bank ownership, sustained transport,
-durable recording, and live-refresh analysis. A physical ADC adapter and
-expansion to additional instrumentation nodes remain future work.
+Q-Crate v1.0.0 establishes the reusable digital foundation. The next focused
+platform milestone is a hardware-independent acquisition-source contract,
+followed by integration only after a concrete physical ADC and measurement
+objective are selected.

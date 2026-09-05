@@ -2,7 +2,9 @@
 
 ## APB Verilator test
 
-This lightweight simulation checks the APB fabric and system-register page without Vivado. It does not compile `qcrate_core.sv` yet because later stream, CDC, and IRQ modules are still planned work.
+This focused simulation checks the APB fabric and system-register page without
+Vivado. It intentionally compiles only the APB subset; the stream, CDC, IRQ,
+sequencer, and DSP blocks have separate subsystem tests later in this document.
 
 Build and run from the repository root:
 
@@ -213,7 +215,8 @@ The test covers sparse event pulse crossing, command mailbox delivery, command b
 
 ## Stream-engine Verilator test
 
-This simulation checks the first AXI4-Stream pattern source used for DMA bring-up. The current MVP stream word is:
+This simulation checks the counter-mode AXI4-Stream source retained for DMA
+bring-up and regression. Its stream word is:
 
 ```text
 TDATA[31:16] = frame ID

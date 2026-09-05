@@ -40,15 +40,16 @@ PetaLinux plus Vitis platform.
 
 | Stage | Status | Purpose | Normal long-term use? |
 |---|---|---|---|
-| Vivado Tcl/RTL build | Active | Reproduce the hardware and export the XSA | Yes |
+| Vivado Tcl/RTL build | Complete | Reproduce the hardware and export the XSA | Yes |
 | Direct FPGA Manager/`fpgautil` load | Closed experiment | Learn the lowest-level runtime bitstream path | No |
 | Kria Ubuntu/`xmutil` package | Closed experiment | Learn bitstream plus device-tree-overlay deployment | No |
 | Fixed PetaLinux boot platform | Complete | Boot the matching bitstream, PS clocks, and static device tree | Yes |
 | Linux DMAEngine capture | Complete | Move stream frames into coherent DDR buffers and verify every word | Yes |
 | Finite SG multi-frame capture | Complete | Pre-arm framed buffers and receive increasing frame IDs from one stream start | Yes |
-| UDP Data Plane v1 | Complete | Send finite DMA shots through a versioned, loss-detecting network contract | Yes |
+| UDP Data Plane v1 | Complete | Send finite and sustained triggered DMA shots through a versioned, loss-detecting network contract | Yes |
 | R5 FreeRTOS/OpenAMP vertical slice | Complete | Linux remoteproc/RPMsg control service with bounded R5 APB diagnostics | Yes |
-| PetaLinux plus Vitis applications | Intended deliverable | Integrate A53 Linux and later R5/OpenAMP software | Yes |
+| PetaLinux plus Vitis applications | Complete | Integrate A53 Linux, R5 FreeRTOS/OpenAMP, DMA, and target services | Yes |
+| Networked Pulsed-IQ Analyzer v1 | Accepted | Run repeated timestamped IQ acquisition through recording, analysis, soak, and recovery qualification | Yes |
 
 Closed experiments remain documented because their commands and failure modes
 are useful for diagnosis. A closed experiment is not the current deployment
