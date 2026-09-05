@@ -124,6 +124,27 @@ integer bits in JSON consumers.
 the process did not close normally; QCRJ and committed QIDX records can still
 be audited.
 
+DP-5D adds backward-compatible operational telemetry to the manifest:
+
+- `timing`: recorder monotonic start/end, elapsed duration, process CPU time,
+  and average process CPU utilization;
+- `performance`: completed-shot rate, published sample-payload throughput, and
+  journaled UDP-payload throughput;
+- `datagram_bytes_journaled`: UDP datagram bytes excluding QCRJ record headers.
+
+These fields do not alter QIDX or Data Plane v1. Old run manifests remain
+readable; consumers display unavailable metrics as unknown rather than zero.
+
+### `sender.json`
+
+This optional `qcrate-sender-report-v1` document is produced atomically by the
+KV260 and copied into a run directory by DP-5D orchestration. It supplies the
+producer-side facts that UDP alone cannot prove: requested duration, capture
+and process timing, sent shots/bytes/datagrams, token and DMA queue high-water
+marks, aggregate stream stalls, missed/skipped triggers, starvation, DMA
+errors, and sender CPU use. Its run and stream IDs must match QIDX before it is
+used.
+
 ## Reader Rules
 
 1. Reject unknown magic, version, header size, record size, nonzero reserved

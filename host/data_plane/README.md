@@ -22,7 +22,7 @@ KV260 qcrate-streamer
      +------------------> packets.qcdp + samples.iq16
                               |
                               v
-                   future qcrate-analyzer GUI
+                      qcrate-analyzer GUI
 ```
 
 The compiled recorder uses Linux `recvmmsg()` to drain UDP in batches and
@@ -91,11 +91,18 @@ selected malformed packets, no sequence collision, and no kernel receive
 queue drops. Exit status 2 means evidence was preserved but the run did not
 meet that acceptance contract.
 
-The planned `qcrate-analyzer` is deliberately a separate Python process. It
-will use `shots.qidx` and `samples.iq16` for fast offline inspection and a
-later Unix notification socket for live updates. GUI latency must never enter
-the UDP receive or shot-ownership path, and the same analyzer contract can be
-ported later to a PYNQ-Z2 host.
+`qcrate-analyzer` is deliberately a separate Python process. It uses
+`shots.qidx` and `samples.iq16` for fast offline inspection and one-second
+append-only live refresh. GUI latency never enters the UDP receive or
+shot-ownership path, and the same analyzer contract can be ported later to a
+PYNQ-Z2 host.
+
+DP-5D extends final `run.json` with recorder duration, CPU, shot-rate, and
+payload-throughput evidence while preserving its existing acceptance fields.
+Accounting begins with the first journaled datagram, so a delayed producer or
+interactive SSH authentication is excluded from acquisition performance.
+The complete instrument procedure is in
+[DP-5D instrument acceptance](../acceptance/README.md).
 
 ## Python Finite-Shot Bundle
 

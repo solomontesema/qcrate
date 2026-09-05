@@ -7,6 +7,8 @@ import binascii
 import hashlib
 import json
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -23,7 +25,7 @@ sys.path.insert(0, str(DSP_DIR))
 import qcrate_capture_viewer as capture_viewer  # noqa: E402
 import qcrate_dsp as dsp  # noqa: E402
 import qcrate_dsp_reference as deployed_reference  # noqa: E402
-from qcrate_run import RunBundle, ShotRecord  # noqa: E402
+from qcrate_run import RunBundle, RunHealth, ShotRecord  # noqa: E402
 
 
 DEFAULT_SAMPLE_RATE_HZ = 12_500_000.0
@@ -238,8 +240,52 @@ def analysis_metadata(analysis: ShotAnalysis) -> list[tuple[str, str]]:
     ]
 
 
+def health_rows(health: RunHealth) -> list[tuple[str, str]]:
+    udp_rate = (
+        "pending" if health.udp_payload_mbps is None
+        else f"{health.udp_payload_mbps:.3f} Mb/s"
+    )
+    queue_health = (
+        "pending sender report"
+        if health.token_queue_high_water is None
+        else f"token {health.token_queue_high_water}, DMA {health.dma_ready_high_water} banks"
+    )
+    dma_health = (
+        "pending sender report"
+        if health.dma_stall_cycles is None
+        else (
+            f"stall {health.dma_stall_cycles}, backpressure {health.starvation_events}, "
+            f"missed/skipped {health.missed_triggers}/{health.skipped_triggers}"
+        )
+    )
+    cpu = (
+        "pending"
+        if health.recorder_cpu_percent is None
+        else f"host {health.recorder_cpu_percent:.2f}%"
+    )
+    if health.sender_cpu_percent is not None:
+        cpu += f", KV260 {health.sender_cpu_percent:.2f}%"
+    integrity_events = (
+        health.incomplete_shots + health.missing_packets
+        + health.malformed_packets + health.conflicting_packets
+        + health.kernel_receive_drops + health.continuity_errors
+    )
+    return [
+        ("Elapsed / rate", f"{health.duration_seconds:.1f} s / {health.shot_rate_hz:.3f} shot/s"),
+        ("Sample / UDP", f"{health.sample_payload_mbps:.3f} / {udp_rate}"),
+        ("Datagrams", f"{health.datagrams:,}"),
+        ("Dup / reorder", f"{health.duplicate_packets} / {health.reordered_packets}"),
+        ("Late / foreign", f"{health.late_packets} / {health.foreign_packets}"),
+        ("Loss / skipped IDs", f"{integrity_events} / {health.skipped_shot_ids}"),
+        ("Queue high water", queue_health),
+        ("DMA / backpressure", dma_health),
+        ("Process CPU", cpu),
+    ]
+
+
 class AnalyzerApplication:
-    def __init__(self, initial_run: Path | None, fallback_rate: float) -> None:
+    def __init__(self, initial_run: Path | None, fallback_rate: float,
+                 session_log: Path | None = None) -> None:
         import tkinter as tk
         from tkinter import ttk
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
@@ -258,12 +304,22 @@ class AnalyzerApplication:
         self.run_summary = tk.StringVar(value="Select a Q-Crate run directory")
         self.status = tk.StringVar(value="Ready")
         self.follow = tk.BooleanVar(value=True)
+        self.instrument_state = tk.StringVar(value="NO RUN")
+        self.session_log = session_log
+        self.session_id = uuid.uuid4().hex
+        self.logged_run: tuple[Path, int] | None = None
 
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
             style.theme_use("clam")
         style.configure("Treeview", rowheight=25)
         style.configure("Header.TLabel", font=("TkDefaultFont", 11, "bold"))
+        style.configure("Health.Accepted.TLabel", foreground="#087f5b",
+                        font=("TkDefaultFont", 11, "bold"))
+        style.configure("Health.Failed.TLabel", foreground="#991b1b",
+                        font=("TkDefaultFont", 11, "bold"))
+        style.configure("Health.Recording.TLabel", foreground="#175d8d",
+                        font=("TkDefaultFont", 11, "bold"))
 
         toolbar = ttk.Frame(self.root, padding=(10, 8))
         toolbar.pack(fill=tk.X)
@@ -284,12 +340,30 @@ class AnalyzerApplication:
         ttk.Label(sidebar, text="Run", style="Header.TLabel").pack(anchor=tk.W)
         ttk.Label(sidebar, textvariable=self.run_summary, justify=tk.LEFT,
                   wraplength=330).pack(anchor=tk.W, fill=tk.X, pady=(3, 10))
+        health_header = ttk.Frame(sidebar)
+        health_header.pack(fill=tk.X)
+        ttk.Label(health_header, text="Instrument health",
+                  style="Header.TLabel").pack(side=tk.LEFT)
+        self.health_state_label = ttk.Label(
+            health_header, textvariable=self.instrument_state,
+            style="Health.Recording.TLabel",
+        )
+        self.health_state_label.pack(side=tk.RIGHT)
+        self.health_tree = ttk.Treeview(
+            sidebar, columns=("value",), show="tree headings", height=9,
+            selectmode="none",
+        )
+        self.health_tree.heading("#0", text="Metric")
+        self.health_tree.heading("value", text="Value")
+        self.health_tree.column("#0", width=130, stretch=False)
+        self.health_tree.column("value", width=207, stretch=True)
+        self.health_tree.pack(fill=tk.X, pady=(4, 10))
         ttk.Label(sidebar, text="Shots", style="Header.TLabel").pack(anchor=tk.W)
         shot_frame = ttk.Frame(sidebar)
         shot_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 10))
         self.shot_tree = ttk.Treeview(
             shot_frame, columns=("state", "timestamp", "frames", "bytes"),
-            show="tree headings", selectmode="browse", height=16,
+            show="tree headings", selectmode="browse", height=11,
         )
         self.shot_tree.heading("#0", text="Shot")
         self.shot_tree.heading("state", text="State")
@@ -311,7 +385,7 @@ class AnalyzerApplication:
 
         ttk.Label(sidebar, text="Measurement", style="Header.TLabel").pack(anchor=tk.W)
         self.metadata = ttk.Treeview(
-            sidebar, columns=("value",), show="tree headings", height=13,
+            sidebar, columns=("value",), show="tree headings", height=10,
             selectmode="none",
         )
         self.metadata.heading("#0", text="Field")
@@ -334,6 +408,8 @@ class AnalyzerApplication:
         self.root.bind("<Control-s>", lambda _event: self.save_png())
         self.root.bind("<Left>", lambda _event: self.move_selection(-1))
         self.root.bind("<Right>", lambda _event: self.move_selection(1))
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.log_session("start")
         self.root.after(1000, self.periodic_refresh)
         if initial_run is not None:
             self.load_run(initial_run)
@@ -350,12 +426,55 @@ class AnalyzerApplication:
                   ha="center", fontsize=11, color="#4b5563", transform=axis.transAxes)
         self.canvas.draw_idle()
 
+    def render_waiting(self) -> None:
+        self.figure.clear()
+        axis = self.figure.subplots(1, 1)
+        axis.set_axis_off()
+        axis.text(0.5, 0.54, "Waiting for first measurement", ha="center",
+                  fontsize=18, color="#175d8d", transform=axis.transAxes)
+        axis.text(0.5, 0.46, "Recorder is ready", ha="center", fontsize=10,
+                  color="#4b5563", transform=axis.transAxes)
+        self.canvas.draw_idle()
+
     def choose_run(self) -> None:
         from tkinter import filedialog
 
         selected = filedialog.askdirectory(title="Open Q-Crate run")
         if selected:
             self.load_run(Path(selected))
+
+    def log_session(self, event: str, bundle: RunBundle | None = None) -> None:
+        if self.session_log is None:
+            return
+        record: dict[str, object] = {
+            "format": "qcrate-analyzer-session-v1",
+            "session_id": self.session_id,
+            "event": event,
+            "unix_time_ns": time.time_ns(),
+        }
+        if bundle is not None:
+            record["run_id"] = f"0x{bundle.run_id:016x}"
+            record["run_path"] = str(bundle.path)
+        self.session_log.parent.mkdir(parents=True, exist_ok=True)
+        with self.session_log.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+            stream.flush()
+
+    def close(self) -> None:
+        self.log_session("close", self.bundle)
+        self.root.destroy()
+
+    def update_health(self, health: RunHealth) -> None:
+        self.health_tree.delete(*self.health_tree.get_children())
+        for name, value in health_rows(health):
+            self.health_tree.insert("", "end", text=name, values=(value,))
+        self.instrument_state.set(health.state.upper())
+        style = {
+            "accepted": "Health.Accepted.TLabel",
+            "failed": "Health.Failed.TLabel",
+            "recording": "Health.Recording.TLabel",
+        }[health.state]
+        self.health_state_label.configure(style=style)
 
     def load_run(self, path: Path, *, preserve: bool = False) -> None:
         from tkinter import messagebox
@@ -368,15 +487,25 @@ class AnalyzerApplication:
                 messagebox.showerror("Cannot open run", str(exc))
             self.status.set(f"Run refresh failed: {exc}")
             return
+        old_shots = self.bundle.shots if self.bundle is not None else ()
+        follow_tail = bool(
+            preserve and old_shots and previous == old_shots[-1].shot_id
+        )
         unchanged = self.bundle is not None and self.bundle.path == bundle.path and len(self.bundle.shots) == len(bundle.shots)
         self.bundle = bundle
         self.run_path.set(str(bundle.path))
-        state = "recording" if bundle.run_complete is None else ("accepted" if bundle.run_complete else "failed")
+        health = bundle.health()
+        state = health.state
         self.run_summary.set(
             f"Run 0x{bundle.run_id:016x}\nStream 0x{bundle.stream_id:08x}\n"
             f"State: {state}\nComplete: {len(bundle.complete_shots)}   "
             f"Incomplete: {len(bundle.incomplete_shots)}"
         )
+        self.update_health(health)
+        run_identity = (bundle.path, bundle.run_id)
+        if bundle.run_id and self.logged_run != run_identity:
+            self.log_session("open_run", bundle)
+            self.logged_run = run_identity
         if unchanged:
             return
         self.shot_tree.delete(*self.shot_tree.get_children())
@@ -388,13 +517,25 @@ class AnalyzerApplication:
                 tags=(() if shot.complete else ("incomplete",)),
             )
         shot_ids = [shot.shot_id for shot in bundle.shots]
-        selected = previous if previous in shot_ids else (shot_ids[0] if shot_ids else None)
+        selected = (
+            shot_ids[-1] if follow_tail and shot_ids
+            else previous if previous in shot_ids
+            else shot_ids[-1] if shot_ids else None
+        )
         if selected is not None:
             self.shot_tree.selection_set(str(selected))
             self.shot_tree.see(str(selected))
             self.display_shot(selected)
         else:
-            self.status.set("Run contains no committed shot records")
+            if bundle.run_id == 0 and bundle.manifest is None:
+                self.run_summary.set(
+                    "Run awaiting first datagram\nState: recording\n"
+                    "Complete: 0   Incomplete: 0"
+                )
+                self.render_waiting()
+                self.status.set("Recorder is ready; waiting for first measurement")
+            else:
+                self.status.set("Run contains no committed shot records")
 
     def on_select(self, _event: object) -> None:
         selection = self.shot_tree.selection()
@@ -514,6 +655,10 @@ def parse_args() -> argparse.Namespace:
                         help="fallback for old manifests without stream metadata")
     parser.add_argument("--snapshot", type=Path, help="write one PNG without opening the GUI")
     parser.add_argument("--shot", type=int, help="shot ID for --snapshot")
+    parser.add_argument(
+        "--session-log", type=Path,
+        help="append machine-readable GUI lifecycle evidence",
+    )
     return parser.parse_args()
 
 
@@ -528,7 +673,8 @@ def main() -> int:
             write_snapshot(args.run, args.snapshot, shot_id=args.shot,
                            fallback_rate=args.sample_rate_hz)
         else:
-            AnalyzerApplication(args.run, args.sample_rate_hz).run()
+            AnalyzerApplication(args.run, args.sample_rate_hz,
+                                args.session_log).run()
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise SystemExit(f"error: {exc}") from exc
     return 0

@@ -34,7 +34,11 @@ bytes.
 
 The application provides:
 
-- run status and complete/incomplete shot counts;
+- live run state, elapsed time, shot and payload rates, and
+  complete/incomplete shot counts;
+- packet integrity, kernel drop, skipped-shot, queue high-water, DMA
+  stall/starvation, and host/KV260 CPU metrics when final manifests are
+  available;
 - a sortable visual list of shot identity, state, timestamp, frame count, and
   published bytes;
 - previous/next navigation and PNG export;
@@ -64,10 +68,17 @@ plotting, headless export, and the Tk desktop application. NumPy and Matplotlib
 are reused from the bit-accurate DSP environment. Tk is supplied by the host
 Python installation rather than PyPI.
 
-The current live mode polls append-only QIDX once per second. This preserves
+The current live mode polls append-only QIDX once per second. It follows the
+newest shot while the operator remains at the tail; selecting an older shot
+freezes that selection for comparison. This preserves
 the recorder boundary and requires no second IPC protocol. A future event
 notification socket can reduce latency without changing QIDX or analyzer
 ownership.
+
+The instrument-health panel is derived from committed QIDX records during a
+run. Recorder CPU, exact UDP throughput, and sender DMA/queue metrics appear
+after the atomic `run.json` and `sender.json` reports arrive. Their temporary
+absence is displayed as pending rather than guessed.
 
 ## Setup
 
@@ -129,6 +140,17 @@ python3 host/analyzer/qcrate_analyzer.py RUN_DIR \
 
 Omit `--shot` to export the first complete shot. Headless mode is useful for
 automated reports, remote systems, and future PYNQ notebooks.
+
+DP-5D can append GUI lifecycle evidence without placing control traffic in the
+recorder:
+
+```bash
+python3 host/analyzer/qcrate_analyzer.py RUN_DIR \
+  --session-log RUN_DIR/analyzer-sessions.jsonl
+```
+
+See [DP-5D instrument acceptance](../acceptance/README.md) for the five-minute
+soak, restart tests, and final machine-readable verdict.
 
 ## Accepted DP-5C2 Run
 

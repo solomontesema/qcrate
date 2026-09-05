@@ -53,6 +53,7 @@
 #define QCRATE_DEFAULT_RATE_MBPS       420U
 #define QCRATE_DEFAULT_BANKS           4U
 #define QCRATE_DEFAULT_SEQUENCE_TIMEOUT_MS 2000U
+#define QCRATE_MAX_DURATION_SECONDS    (24U * 60U * 60U)
 #define QCRATE_DMA_RESULT_NOERROR      0U
 #define QCRATE_STREAM_MODE_COUNTER     0U
 #define QCRATE_STREAM_MODE_DSP         1U
@@ -78,8 +79,11 @@ struct options {
 	uint32_t bank_count;
 	uint32_t sequence_timeout_ms;
 	uint64_t triggered_shots;
+	uint32_t duration_seconds;
+	const char *report_json;
 	bool run_id_set;
 	bool triggered_mode;
+	bool duration_mode;
 };
 
 struct udp_emitter {
@@ -121,8 +125,20 @@ struct sustained_context {
 	uint64_t acquired_shots;
 	uint64_t transmitted_shots;
 	uint64_t payload_bytes;
+	uint64_t dma_stall_cycles;
+	uint64_t missed_trigger_count;
 	uint32_t last_shot_id;
 	uint64_t last_first_sample_time;
+	struct qcrate_dma_pool_status final_pool_status;
+	uint64_t start_monotonic_ns;
+	uint64_t end_monotonic_ns;
+	uint64_t capture_start_monotonic_ns;
+	uint64_t capture_end_monotonic_ns;
+	uint64_t start_cpu_ns;
+	uint64_t end_cpu_ns;
+	bool acquisition_complete;
+	bool success;
+	int result_errno;
 };
 
 static volatile sig_atomic_t stop_requested;
@@ -148,8 +164,10 @@ static void usage(FILE *stream, const char *program)
 		"      --send-buffer N      requested SO_SNDBUF bytes\n"
 		"      --rate-mbps N        UDP payload pacing; 0 disables\n"
 		"      --triggered-shots N  overlap N R5-triggered bank captures\n"
+		"      --duration-seconds N run triggered captures for at least N seconds\n"
 		"      --banks N            pool/queue banks (default %u)\n"
 		"      --sequence-timeout-ms N  R5 state timeout (default %u)\n"
+		"      --report-json PATH   atomically write triggered-run evidence\n"
 		"  -h, --help               show this help\n",
 		program, QCRATE_DEFAULT_PORT, QCRATE_DEFAULT_DEVICE,
 		QCRATE_DEFAULT_WORDS, QCRATE_DEFAULT_FRAMES,
@@ -197,8 +215,10 @@ static int parse_options(int argc, char **argv, struct options *options)
 		OPT_RATE,
 		OPT_RPMSG_DEVICE,
 		OPT_TRIGGERED_SHOTS,
+		OPT_DURATION_SECONDS,
 		OPT_BANKS,
 		OPT_SEQUENCE_TIMEOUT,
+		OPT_REPORT_JSON,
 	};
 	static const struct option long_options[] = {
 		{"destination", required_argument, NULL, 'd'},
@@ -215,9 +235,11 @@ static int parse_options(int argc, char **argv, struct options *options)
 		{"rate-mbps", required_argument, NULL, OPT_RATE},
 		{"rpmsg-device", required_argument, NULL, OPT_RPMSG_DEVICE},
 		{"triggered-shots", required_argument, NULL, OPT_TRIGGERED_SHOTS},
+		{"duration-seconds", required_argument, NULL, OPT_DURATION_SECONDS},
 		{"banks", required_argument, NULL, OPT_BANKS},
 		{"sequence-timeout-ms", required_argument, NULL,
 		 OPT_SEQUENCE_TIMEOUT},
+		{"report-json", required_argument, NULL, OPT_REPORT_JSON},
 		{"help", no_argument, NULL, 'h'},
 		{NULL, 0, NULL, 0},
 	};
@@ -303,6 +325,13 @@ static int parse_options(int argc, char **argv, struct options *options)
 				return -1;
 			options->triggered_mode = true;
 			break;
+		case OPT_DURATION_SECONDS:
+			if (parse_u32(optarg, 1, QCRATE_MAX_DURATION_SECONDS,
+				      &options->duration_seconds))
+				return -1;
+			options->triggered_mode = true;
+			options->duration_mode = true;
+			break;
 		case OPT_BANKS:
 			if (parse_u32(optarg, 2, QCRATE_DMA_MAX_POOL_BANKS,
 				      &options->bank_count))
@@ -313,13 +342,43 @@ static int parse_options(int argc, char **argv, struct options *options)
 				      &options->sequence_timeout_ms))
 				return -1;
 			break;
+		case OPT_REPORT_JSON:
+			if (!optarg[0])
+				return -1;
+			options->report_json = optarg;
+			break;
 		default:
 			return -1;
 		}
 	}
-	if (!options->destination || optind != argc)
+	if (!options->destination || optind != argc ||
+	    (options->duration_mode && options->triggered_shots) ||
+	    (options->report_json && !options->triggered_mode))
 		return -1;
 	return 0;
+}
+
+static uint64_t clock_nanoseconds(clockid_t clock_id)
+{
+	struct timespec value;
+
+	if (clock_gettime(clock_id, &value))
+		return 0;
+	return (uint64_t)value.tv_sec * UINT64_C(1000000000) +
+	       (uint64_t)value.tv_nsec;
+}
+
+static bool duration_elapsed(const struct sustained_context *context)
+{
+	uint64_t duration_ns;
+	uint64_t now;
+
+	if (!context->options->duration_mode)
+		return false;
+	duration_ns = (uint64_t)context->options->duration_seconds *
+		UINT64_C(1000000000);
+	now = clock_nanoseconds(CLOCK_MONOTONIC);
+	return now && now - context->capture_start_monotonic_ns >= duration_ns;
 }
 
 static int random_nonzero_u64(uint64_t *value)
@@ -807,13 +866,20 @@ static void *acquisition_thread(void *argument)
 	uint64_t previous_first_sample_time = 0;
 	uint32_t previous_shot_id = 0;
 	bool have_previous = false;
-	uint64_t shot;
+	uint64_t shot = 0;
 
 	if (sequence_require_committed_idle(context)) {
 		pipeline_fail(context, "R5 sequence is not committed and idle", errno);
 		goto done;
 	}
-	for (shot = 0; shot < context->options->triggered_shots; shot++) {
+	context->capture_start_monotonic_ns = clock_nanoseconds(CLOCK_MONOTONIC);
+	for (;;) {
+		if ((!context->options->duration_mode &&
+		     shot >= context->options->triggered_shots) ||
+		    (shot > 0 && duration_elapsed(context))) {
+			context->acquisition_complete = true;
+			break;
+		}
 		if (stop_requested || queue_failed(&context->queue))
 			break;
 		if (wait_pool_armed(context)) {
@@ -844,6 +910,8 @@ static void *acquisition_thread(void *argument)
 		previous_shot_id = bank.trigger_shot_id;
 		previous_first_sample_time = bank.first_sample_time;
 		have_previous = true;
+		context->dma_stall_cycles += bank.stall_cycles;
+		context->missed_trigger_count += bank.missed_trigger_count;
 		if (sequence_wait_idle(context)) {
 			pipeline_fail(context, "R5 sequence completion", errno);
 			break;
@@ -851,8 +919,10 @@ static void *acquisition_thread(void *argument)
 		if (queue_push(&context->queue, &bank))
 			break;
 		context->acquired_shots++;
+		shot++;
 	}
 done:
+	context->capture_end_monotonic_ns = clock_nanoseconds(CLOCK_MONOTONIC);
 	queue_finish(&context->queue);
 	return NULL;
 }
@@ -908,8 +978,9 @@ static void *sender_thread(void *argument)
 		context->last_shot_id = bank.trigger_shot_id;
 		context->last_first_sample_time = bank.first_sample_time;
 	}
-	if (pop_status == 0 &&
-	    context->transmitted_shots == context->options->triggered_shots) {
+	if (pop_status == 0 && context->acquisition_complete &&
+	    context->transmitted_shots == context->acquired_shots &&
+	    context->transmitted_shots > 0) {
 		packet_status = qcrate_data_emit_end_of_stream(
 			context->options->stream_id, context->options->run_id,
 			context->last_shot_id, context->packet_sequence, emit_udp,
@@ -958,27 +1029,37 @@ static int run_sustained(struct sustained_context *context)
 	bool sender_created = false;
 	int thread_status;
 	int result = -1;
+	int saved_errno = 0;
 
+	context->start_monotonic_ns = clock_nanoseconds(CLOCK_MONOTONIC);
+	context->start_cpu_ns = clock_nanoseconds(CLOCK_PROCESS_CPUTIME_ID);
 	thread_status = queue_init(&context->queue, context->options->bank_count);
 	if (thread_status) {
 		errno = thread_status;
+		context->end_cpu_ns = clock_nanoseconds(CLOCK_PROCESS_CPUTIME_ID);
+		context->end_monotonic_ns = clock_nanoseconds(CLOCK_MONOTONIC);
+		context->result_errno = thread_status;
 		return -1;
 	}
-	if (install_signal_handlers())
+	if (install_signal_handlers()) {
+		pipeline_fail(context, "signal handler installation", errno);
 		goto out;
-	if (ioctl(context->device_fd, QCRATE_DMA_IOC_POOL_START, &pool_start))
+	}
+	if (ioctl(context->device_fd, QCRATE_DMA_IOC_POOL_START, &pool_start)) {
+		pipeline_fail(context, "DMA pool start", errno);
 		goto out;
+	}
 	context->pool_run_id = pool_start.run_id;
 	pool_stop.run_id = pool_start.run_id;
 	if (!pool_start.run_id ||
 	    pool_start.bank_bytes != (size_t)context->options->words *
 		context->options->frames * sizeof(uint32_t)) {
-		errno = EPROTO;
+		pipeline_fail(context, "DMA pool start evidence", EPROTO);
 		goto stop;
 	}
 	thread_status = pthread_create(&sender, NULL, sender_thread, context);
 	if (thread_status) {
-		errno = thread_status;
+		pipeline_fail(context, "sender thread creation", thread_status);
 		goto stop;
 	}
 	sender_created = true;
@@ -1001,25 +1082,32 @@ join:
 	if (ioctl(context->device_fd, QCRATE_DMA_IOC_POOL_STATUS, &pool_status))
 		pipeline_fail(context, "DMA pool status", errno);
 	if (!queue_failed(&context->queue) && !stop_requested &&
-	    context->acquired_shots == context->options->triggered_shots &&
-	    context->transmitted_shots == context->options->triggered_shots)
+	    context->acquisition_complete && context->acquired_shots > 0 &&
+	    context->transmitted_shots == context->acquired_shots)
 		result = 0;
 	else if (!queue_failed(&context->queue) && stop_requested)
 		errno = EINTR;
 
 stop:
-	if (ioctl(context->device_fd, QCRATE_DMA_IOC_POOL_STOP, &pool_stop) &&
-	    result == 0) {
-		result = -1;
+	if (ioctl(context->device_fd, QCRATE_DMA_IOC_POOL_STOP, &pool_stop)) {
+		if (result == 0)
+			result = -1;
+		pipeline_fail(context, "DMA pool stop", errno);
 	}
 	if (result)
 		abort_sequence_best_effort(context);
 out:
+	saved_errno = errno;
+	context->final_pool_status = pool_status;
+	context->end_cpu_ns = clock_nanoseconds(CLOCK_PROCESS_CPUTIME_ID);
+	context->end_monotonic_ns = clock_nanoseconds(CLOCK_MONOTONIC);
+	context->success = result == 0;
 	if (context->queue.failed) {
-		errno = context->queue.error_number;
+		saved_errno = context->queue.error_number;
 		fprintf(stderr, "%s failed: %s\n", context->queue.error_context,
-			strerror(errno));
+			strerror(saved_errno));
 	}
+	context->result_errno = result ? (saved_errno ? saved_errno : EIO) : 0;
 	if (!result) {
 		printf("PASS Q-Crate sustained triggered run transmitted\n");
 		printf("shots acquired/sent: %" PRIu64 " / %" PRIu64 "\n",
@@ -1035,12 +1123,130 @@ out:
 		       context->queue.high_water);
 		printf("DMA ready HWM     : %u banks\n",
 		       pool_status.queue_high_water);
+		printf("stall/missed      : %" PRIu64 " / %" PRIu64 "\n",
+		       context->dma_stall_cycles, context->missed_trigger_count);
 		printf("starvation/skipped: %" PRIu64 " / %" PRIu64 "\n",
 		       (uint64_t)pool_status.starvation_events,
 		       (uint64_t)pool_status.skipped_triggers);
 	}
 	queue_destroy(&context->queue);
+	errno = context->result_errno;
 	return result;
+}
+
+static int write_sender_report(const struct sustained_context *context,
+			       int actual_send_buffer)
+{
+	char temporary[PATH_MAX];
+	FILE *report;
+	uint64_t duration_ns;
+	uint64_t capture_duration_ns;
+	uint64_t cpu_ns;
+	double duration_seconds;
+	double cpu_seconds;
+	double cpu_percent;
+	double payload_mbps;
+	double shot_rate;
+	int status = -1;
+
+	if (!context->options->report_json)
+		return 0;
+	if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld",
+		     context->options->report_json, (long)getpid()) >=
+	    (int)sizeof(temporary)) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	duration_ns = context->end_monotonic_ns >= context->start_monotonic_ns ?
+		context->end_monotonic_ns - context->start_monotonic_ns : 0;
+	cpu_ns = context->end_cpu_ns >= context->start_cpu_ns ?
+		context->end_cpu_ns - context->start_cpu_ns : 0;
+	duration_seconds = (double)duration_ns / 1.0e9;
+	capture_duration_ns =
+		context->capture_end_monotonic_ns >= context->capture_start_monotonic_ns ?
+		context->capture_end_monotonic_ns -
+		context->capture_start_monotonic_ns : 0;
+	cpu_seconds = (double)cpu_ns / 1.0e9;
+	cpu_percent = duration_seconds > 0.0 ?
+		100.0 * cpu_seconds / duration_seconds : 0.0;
+	payload_mbps = duration_seconds > 0.0 ?
+		(double)context->payload_bytes * 8.0 / duration_seconds / 1.0e6 : 0.0;
+	shot_rate = duration_seconds > 0.0 ?
+		(double)context->transmitted_shots / duration_seconds : 0.0;
+	report = fopen(temporary, "w");
+	if (!report)
+		return -1;
+	(void)fchmod(fileno(report), 0644);
+	fprintf(report,
+		"{\n"
+		"  \"format\": \"qcrate-sender-report-v1\",\n"
+		"  \"complete\": %s,\n"
+		"  \"run_id\": \"0x%016" PRIx64 "\",\n"
+		"  \"stream_id\": \"0x%08" PRIx32 "\",\n"
+		"  \"pool_run_id\": \"0x%016" PRIx64 "\",\n"
+		"  \"requested\": {\"mode\": \"%s\", \"shots\": %" PRIu64
+		", \"duration_seconds\": %" PRIu32 ", \"banks\": %" PRIu32 "},\n"
+		"  \"timing\": {\"start_monotonic_ns\": %" PRIu64
+		", \"end_monotonic_ns\": %" PRIu64
+		", \"duration_seconds\": %.6f, \"capture_duration_seconds\": %.6f"
+		", \"process_cpu_seconds\": %.6f"
+		", \"process_cpu_percent\": %.3f},\n"
+		"  \"capture\": {\"shots_acquired\": %" PRIu64
+		", \"shots_transmitted\": %" PRIu64
+		", \"last_shot_id\": %" PRIu32
+		", \"last_first_sample_timestamp\": %" PRIu64
+		", \"shot_rate_hz\": %.6f, \"sample_payload_bytes\": %" PRIu64
+		", \"sample_payload_mbps\": %.6f},\n"
+		"  \"network\": {\"datagrams_sent\": %" PRIu64
+		", \"udp_bytes_sent\": %" PRIu64
+		", \"packet_sequence_next\": %" PRIu64
+		", \"requested_send_buffer_bytes\": %" PRIu32
+		", \"actual_send_buffer_bytes\": %d, \"pacing_mbps\": %" PRIu32 "},\n"
+		"  \"health\": {\"token_queue_high_water\": %zu"
+		", \"dma_ready_high_water\": %" PRIu32
+		", \"dma_stall_cycles\": %" PRIu64
+		", \"missed_triggers\": %" PRIu64
+		", \"starvation_events\": %" PRIu64
+		", \"skipped_triggers\": %" PRIu64
+		", \"dma_error_events\": %" PRIu64 "},\n"
+		"  \"error\": {\"number\": %d, \"context\": \"%s\"}\n"
+		"}\n",
+		context->success ? "true" : "false", context->options->run_id,
+		context->options->stream_id, context->pool_run_id,
+		context->options->duration_mode ? "duration" : "shot_count",
+		context->options->triggered_shots, context->options->duration_seconds,
+		context->options->bank_count, context->start_monotonic_ns,
+		context->end_monotonic_ns, duration_seconds,
+		(double)capture_duration_ns / 1.0e9, cpu_seconds, cpu_percent,
+		context->acquired_shots, context->transmitted_shots,
+		context->last_shot_id, context->last_first_sample_time, shot_rate,
+		context->payload_bytes, payload_mbps, context->emitter->datagrams,
+		context->emitter->bytes, context->packet_sequence,
+		context->options->send_buffer, actual_send_buffer,
+		context->options->rate_mbps, context->queue.high_water,
+		context->final_pool_status.queue_high_water,
+		context->dma_stall_cycles, context->missed_trigger_count,
+		(uint64_t)context->final_pool_status.starvation_events,
+		(uint64_t)context->final_pool_status.skipped_triggers,
+		(uint64_t)context->final_pool_status.error_events,
+		context->result_errno,
+		context->queue.failed ? context->queue.error_context : "");
+	if (fflush(report) || fsync(fileno(report)))
+		goto out;
+	if (fclose(report)) {
+		report = NULL;
+		goto out;
+	}
+	report = NULL;
+	if (rename(temporary, context->options->report_json))
+		goto out;
+	status = 0;
+out:
+	if (report)
+		(void)fclose(report);
+	if (status)
+		(void)unlink(temporary);
+	return status;
 }
 
 int main(int argc, char **argv)
@@ -1061,6 +1267,8 @@ int main(int argc, char **argv)
 	int socket_fd = -1;
 	int status = EXIT_FAILURE;
 	int packet_status;
+	int sustained_status;
+	int sustained_errno;
 
 	if (parse_options(argc, argv, &options)) {
 		usage(stderr, argv[0]);
@@ -1149,7 +1357,14 @@ int main(int argc, char **argv)
 			.emitter = &emitter,
 			.rpmsg = &rpmsg,
 		};
-		if (run_sustained(&sustained)) {
+		sustained_status = run_sustained(&sustained);
+		sustained_errno = errno;
+		if (write_sender_report(&sustained, actual_send_buffer)) {
+			perror("sender report write failed");
+			goto out;
+		}
+		if (sustained_status) {
+			errno = sustained_errno;
 			if (errno == EINTR)
 				fprintf(stderr, "triggered run interrupted cleanly\n");
 			else

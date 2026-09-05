@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 import json
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -130,6 +130,82 @@ class ShotRecord:
         return record
 
 
+def _mapping_number(mapping: object, key: str, default: float = 0.0) -> float:
+    if not isinstance(mapping, dict):
+        return default
+    value = mapping.get(key, default)
+    return float(value) if isinstance(value, (int, float)) else default
+
+
+def _manifest_integer(manifest: dict[str, object] | None, key: str) -> int:
+    if manifest is None:
+        return 0
+    value = manifest.get(key, 0)
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+@dataclass(frozen=True)
+class RunHealth:
+    state: str
+    duration_seconds: float
+    duration_source: str
+    complete_shots: int
+    incomplete_shots: int
+    skipped_shot_ids: int
+    shot_rate_hz: float
+    sample_payload_mbps: float
+    udp_payload_mbps: float | None
+    datagrams: int
+    duplicate_packets: int
+    reordered_packets: int
+    missing_packets: int
+    malformed_packets: int
+    conflicting_packets: int
+    foreign_packets: int
+    late_packets: int
+    preselection_overflow: int
+    kernel_receive_drops: int
+    continuity_errors: int
+    token_queue_high_water: int | None
+    dma_ready_high_water: int | None
+    dma_stall_cycles: int | None
+    missed_triggers: int | None
+    starvation_events: int | None
+    skipped_triggers: int | None
+    dma_error_events: int | None
+    recorder_cpu_percent: float | None
+    sender_cpu_percent: float | None
+    sender_complete: bool | None
+
+    @property
+    def record_integrity_ok(self) -> bool:
+        return not any((
+            self.incomplete_shots,
+            self.skipped_shot_ids,
+            self.missing_packets,
+            self.malformed_packets,
+            self.conflicting_packets,
+            self.kernel_receive_drops,
+            self.continuity_errors,
+        ))
+
+    @property
+    def acquisition_integrity_ok(self) -> bool:
+        return not any((
+            self.skipped_triggers or 0,
+            self.dma_error_events or 0,
+            self.missed_triggers or 0,
+        ))
+
+    @property
+    def integrity_ok(self) -> bool:
+        return (
+            self.record_integrity_ok
+            and self.acquisition_integrity_ok
+            and self.sender_complete is not False
+        )
+
+
 @dataclass(frozen=True)
 class RunBundle:
     path: Path
@@ -137,6 +213,7 @@ class RunBundle:
     stream_id: int
     shots: tuple[ShotRecord, ...]
     manifest: dict[str, object] | None
+    sender_report: dict[str, object] | None
     samples_path: Path
 
     @property
@@ -174,6 +251,114 @@ class RunBundle:
             raise ValueError(f"shot {shot.shot_id} sample extent is truncated")
         return payload
 
+    def health(self) -> RunHealth:
+        complete = self.complete_shots
+        incomplete = self.incomplete_shots
+        skipped = sum(
+            max(0, right.shot_id - left.shot_id - 1)
+            for left, right in zip(self.shots, self.shots[1:])
+        )
+        first_receive = min((shot.first_receive_ns for shot in self.shots), default=0)
+        last_receive = max((shot.last_receive_ns for shot in self.shots), default=0)
+        measured_duration = (
+            (last_receive - first_receive) / 1.0e9
+            if last_receive >= first_receive and first_receive else 0.0
+        )
+        timing = self.manifest.get("timing") if self.manifest else None
+        manifest_duration = _mapping_number(timing, "duration_seconds")
+        duration = manifest_duration or measured_duration
+        duration_source = "recorder" if manifest_duration else "QIDX receive times"
+        sample_bytes = sum(shot.sample_bytes for shot in complete)
+        performance = self.manifest.get("performance") if self.manifest else None
+        sample_mbps = _mapping_number(performance, "sample_payload_mbps")
+        if not sample_mbps and duration > 0:
+            sample_mbps = sample_bytes * 8.0 / duration / 1.0e6
+        shot_rate = _mapping_number(performance, "shot_rate_hz")
+        if not shot_rate and duration > 0:
+            shot_rate = len(complete) / duration
+        udp_mbps_value = _mapping_number(performance, "udp_payload_mbps", -1.0)
+        udp_mbps = udp_mbps_value if udp_mbps_value >= 0 else None
+        sender_health = (
+            self.sender_report.get("health") if self.sender_report else None
+        )
+        sender_timing = (
+            self.sender_report.get("timing") if self.sender_report else None
+        )
+        recorder_cpu = _mapping_number(timing, "process_cpu_percent", -1.0)
+        sender_cpu = _mapping_number(sender_timing, "process_cpu_percent", -1.0)
+        sender_complete = (
+            bool(self.sender_report.get("complete")) if self.sender_report else None
+        )
+        health = RunHealth(
+            state="recording",
+            duration_seconds=duration,
+            duration_source=duration_source,
+            complete_shots=len(complete),
+            incomplete_shots=len(incomplete),
+            skipped_shot_ids=skipped,
+            shot_rate_hz=shot_rate,
+            sample_payload_mbps=sample_mbps,
+            udp_payload_mbps=udp_mbps,
+            datagrams=_manifest_integer(self.manifest, "datagrams_journaled")
+            or sum(shot.datagrams for shot in self.shots),
+            duplicate_packets=_manifest_integer(self.manifest, "duplicate_packets")
+            or sum(shot.duplicate_packets for shot in self.shots),
+            reordered_packets=_manifest_integer(self.manifest, "reordered_packets")
+            or sum(shot.reordered_packets for shot in self.shots),
+            missing_packets=sum(shot.missing_packets for shot in self.shots),
+            malformed_packets=_manifest_integer(self.manifest, "malformed_packets"),
+            conflicting_packets=_manifest_integer(self.manifest, "conflicting_packets"),
+            foreign_packets=_manifest_integer(self.manifest, "foreign_packets"),
+            late_packets=_manifest_integer(self.manifest, "late_packets"),
+            preselection_overflow=_manifest_integer(
+                self.manifest, "preselection_overflow"
+            ),
+            kernel_receive_drops=_manifest_integer(
+                self.manifest, "kernel_receive_drops"
+            ),
+            continuity_errors=int(bool(
+                self.manifest and self.manifest.get("run_continuity_error")
+            )),
+            token_queue_high_water=(
+                int(_mapping_number(sender_health, "token_queue_high_water"))
+                if isinstance(sender_health, dict) else None
+            ),
+            dma_ready_high_water=(
+                int(_mapping_number(sender_health, "dma_ready_high_water"))
+                if isinstance(sender_health, dict) else None
+            ),
+            dma_stall_cycles=(
+                int(_mapping_number(sender_health, "dma_stall_cycles"))
+                if isinstance(sender_health, dict) else None
+            ),
+            missed_triggers=(
+                int(_mapping_number(sender_health, "missed_triggers"))
+                if isinstance(sender_health, dict) else None
+            ),
+            starvation_events=(
+                int(_mapping_number(sender_health, "starvation_events"))
+                if isinstance(sender_health, dict) else None
+            ),
+            skipped_triggers=(
+                int(_mapping_number(sender_health, "skipped_triggers"))
+                if isinstance(sender_health, dict) else None
+            ),
+            dma_error_events=(
+                int(_mapping_number(sender_health, "dma_error_events"))
+                if isinstance(sender_health, dict) else None
+            ),
+            recorder_cpu_percent=recorder_cpu if recorder_cpu >= 0 else None,
+            sender_cpu_percent=sender_cpu if sender_cpu >= 0 else None,
+            sender_complete=sender_complete,
+        )
+        state = (
+            "failed" if not health.integrity_ok
+            else "recording" if self.run_complete is None
+            else "accepted" if self.run_complete and sender_complete is not False
+            else "failed"
+        )
+        return replace(health, state=state)
+
     @classmethod
     def open(cls, path: Path, *, allow_in_progress: bool = False) -> "RunBundle":
         root = path.resolve()
@@ -181,7 +366,11 @@ class RunBundle:
         samples_path = root / "samples.iq16"
         raw = index_path.read_bytes()
         if len(raw) < QIDX_HEADER_BYTES:
-            raise ValueError("QIDX header is truncated")
+            if not allow_in_progress:
+                raise ValueError("QIDX header is truncated")
+            if not samples_path.exists():
+                raise ValueError("run sample file is missing")
+            return cls(root, 0, 0, (), None, None, samples_path)
         magic, version, header_bytes, record_bytes, run_id, stream_id = (
             QIDX_HEADER.unpack_from(raw)
         )
@@ -227,4 +416,19 @@ class RunBundle:
             if int(str(parsed.get("stream_id", "0")), 0) != stream_id:
                 raise ValueError("run.json and QIDX stream IDs disagree")
             manifest = parsed
-        return cls(root, run_id, stream_id, shots, manifest, samples_path)
+        sender_report = None
+        sender_path = root / "sender.json"
+        if sender_path.exists():
+            parsed = json.loads(sender_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(parsed, dict)
+                or parsed.get("format") != "qcrate-sender-report-v1"
+            ):
+                raise ValueError("unsupported sender.json format")
+            if int(str(parsed.get("run_id", "0")), 0) != run_id:
+                raise ValueError("sender.json and QIDX run IDs disagree")
+            if int(str(parsed.get("stream_id", "0")), 0) != stream_id:
+                raise ValueError("sender.json and QIDX stream IDs disagree")
+            sender_report = parsed
+        return cls(root, run_id, stream_id, shots, manifest, sender_report,
+                   samples_path)

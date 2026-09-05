@@ -127,9 +127,14 @@ struct run_state {
 	uint64_t terminal_shot_id;
 	uint64_t terminal_seen_ns;
 	bool run_continuity_error;
+	uint64_t listen_ns;
 	uint64_t start_ns;
+	uint64_t end_ns;
+	uint64_t start_cpu_ns;
+	uint64_t end_cpu_ns;
 	uint64_t last_datagram_ns;
 	uint64_t journal_records;
+	uint64_t datagram_bytes;
 	uint64_t valid_packets;
 	uint64_t malformed_packets;
 	uint64_t foreign_packets;
@@ -158,6 +163,16 @@ static uint64_t monotonic_ns(void)
 	struct timespec value;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &value))
+		return 0;
+	return (uint64_t)value.tv_sec * UINT64_C(1000000000) +
+	       (uint64_t)value.tv_nsec;
+}
+
+static uint64_t process_cpu_ns(void)
+{
+	struct timespec value;
+
+	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &value))
 		return 0;
 	return (uint64_t)value.tv_sec * UINT64_C(1000000000) +
 	       (uint64_t)value.tv_nsec;
@@ -387,6 +402,10 @@ static int journal_datagram(struct run_state *run,
 	uint8_t header[QCRATE_JOURNAL_RECORD_BYTES];
 	uint8_t family = source->family == AF_INET ? 4 : 6;
 
+	if (!run->journal_records) {
+		run->start_ns = receive_ns;
+		run->start_cpu_ns = process_cpu_ns();
+	}
 	if (bytes > UINT16_MAX ||
 	    qcrate_journal_record_encode(header, (uint16_t)bytes, family,
 					 source->port, receive_ns,
@@ -395,6 +414,7 @@ static int journal_datagram(struct run_state *run,
 	    write_exact(run->journal, datagram, bytes))
 		return -1;
 	run->journal_records++;
+	run->datagram_bytes += bytes;
 	if (!(run->journal_records % 256) && fflush(run->journal))
 		return -1;
 	return 0;
@@ -1284,8 +1304,9 @@ static int receive_run(struct run_state *run)
 {
 	struct pollfd descriptor = {.fd = run->socket_fd, .events = POLLIN};
 
-	run->start_ns = monotonic_ns();
-	run->last_datagram_ns = run->start_ns;
+	run->listen_ns = monotonic_ns();
+	run->start_ns = run->listen_ns;
+	run->last_datagram_ns = run->listen_ns;
 	run->receive_storage = malloc(QCRATE_RECEIVE_BATCH *
 				      QCRATE_MAX_UDP_DATAGRAM);
 	if (!run->receive_storage)
@@ -1300,7 +1321,7 @@ static int receive_run(struct run_state *run)
 			if (elapsed_ms >= run->options.end_grace_ms)
 				break;
 		} else if (!run->journal_records) {
-			elapsed_ms = (now - run->start_ns) / UINT64_C(1000000);
+			elapsed_ms = (now - run->listen_ns) / UINT64_C(1000000);
 			if (elapsed_ms >= run->options.wait_timeout_ms)
 				break;
 		} else {
@@ -1338,6 +1359,20 @@ static int write_manifest(const struct run_state *run, bool clean)
 	char temporary[PATH_MAX];
 	char final[PATH_MAX];
 	FILE *manifest;
+	uint64_t duration_ns = run->end_ns >= run->start_ns ?
+		run->end_ns - run->start_ns : 0;
+	uint64_t cpu_ns = run->end_cpu_ns >= run->start_cpu_ns ?
+		run->end_cpu_ns - run->start_cpu_ns : 0;
+	double duration_seconds = (double)duration_ns / 1.0e9;
+	double cpu_seconds = (double)cpu_ns / 1.0e9;
+	double cpu_percent = duration_seconds > 0.0 ?
+		100.0 * cpu_seconds / duration_seconds : 0.0;
+	double sample_mbps = duration_seconds > 0.0 ?
+		(double)run->sample_offset * 8.0 / duration_seconds / 1.0e6 : 0.0;
+	double udp_mbps = duration_seconds > 0.0 ?
+		(double)run->datagram_bytes * 8.0 / duration_seconds / 1.0e6 : 0.0;
+	double shot_rate = duration_seconds > 0.0 ?
+		(double)run->complete_shots / duration_seconds : 0.0;
 
 	if (snprintf(temporary, sizeof(temporary), "%s/.run.json.tmp",
 		     run->options.output) >= (int)sizeof(temporary) ||
@@ -1389,9 +1424,16 @@ static int write_manifest(const struct run_state *run, bool clean)
 		"  \"terminal_received\": %s,\n"
 		"  \"run_continuity_error\": %s,\n"
 		"  \"interrupted\": %s,\n"
+		"  \"timing\": {\"start_monotonic_ns\": %" PRIu64
+		", \"end_monotonic_ns\": %" PRIu64
+		", \"duration_seconds\": %.6f, \"process_cpu_seconds\": %.6f"
+		", \"process_cpu_percent\": %.3f},\n"
+		"  \"performance\": {\"shot_rate_hz\": %.6f"
+		", \"sample_payload_mbps\": %.6f, \"udp_payload_mbps\": %.6f},\n"
 		"  \"shots_complete\": %" PRIu64 ",\n"
 		"  \"shots_incomplete\": %" PRIu64 ",\n"
 		"  \"datagrams_journaled\": %" PRIu64 ",\n"
+		"  \"datagram_bytes_journaled\": %" PRIu64 ",\n"
 		"  \"valid_packets\": %" PRIu64 ",\n"
 		"  \"malformed_packets\": %" PRIu64 ",\n"
 		"  \"foreign_packets\": %" PRIu64 ",\n"
@@ -1407,8 +1449,10 @@ static int write_manifest(const struct run_state *run, bool clean)
 		"}\n",
 		run->terminal_seen ? "true" : "false",
 		run->run_continuity_error ? "true" : "false",
-		run->interrupted ? "true" : "false", run->complete_shots,
-		run->incomplete_shots, run->journal_records, run->valid_packets,
+		run->interrupted ? "true" : "false", run->start_ns, run->end_ns,
+		duration_seconds, cpu_seconds, cpu_percent, shot_rate, sample_mbps,
+		udp_mbps, run->complete_shots, run->incomplete_shots,
+		run->journal_records, run->datagram_bytes, run->valid_packets,
 		run->malformed_packets, run->foreign_packets,
 		run->duplicate_packets, run->reordered_packets,
 		run->conflicting_packets, run->late_packets, run->pending_overflow,
@@ -1477,7 +1521,11 @@ int main(int argc, char **argv)
 	(void)sigaction(SIGTERM, &action, NULL);
 	printf("Q-Crate recorder listening on %s:%u\n",
 	       run.options.bind_address, run.options.port);
+	fflush(stdout);
+	run.start_cpu_ns = process_cpu_ns();
 	status = receive_run(&run);
+	run.end_ns = monotonic_ns();
+	run.end_cpu_ns = process_cpu_ns();
 	clean = status == 0 && run.selected && run.terminal_seen &&
 		!run.interrupted && run.complete_shots > 0 &&
 		!run.incomplete_shots && !run.malformed_packets &&

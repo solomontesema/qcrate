@@ -1,0 +1,49 @@
+{
+  "format": "qcrate-dp5d-accepted-evidence-v1",
+  "status": "ACCEPTED",
+  "generated_utc": "2026-09-05T15:41:13+00:00",
+  "platform": "AMD Kria KV260",
+  "reference_application": "Networked Pulsed-IQ Analyzer v1",
+  "run": {
+    "run_id": "0x8a31ecc3898c5bff",
+    "stream_id": "0x00000001",
+    "duration_seconds": 300.001179,
+    "completed_shots": 108167,
+    "incomplete_shots": 0,
+    "skipped_shot_ids": 0,
+    "iq_words_verified": 443052032,
+    "reference_mismatches": 0,
+    "sample_payload_bytes": 1772208128,
+    "sample_payload_mbps": 47.210034,
+    "udp_payload_mbps": 50.898319,
+    "shot_rate_hz": 360.183974
+  },
+  "health": {
+    "missing_packets": 0,
+    "malformed_packets": 0,
+    "conflicting_packets": 0,
+    "duplicate_packets": 0,
+    "reordered_packets": 0,
+    "kernel_receive_drops": 0,
+    "missed_triggers": 0,
+    "skipped_triggers": 0,
+    "dma_error_events": 0,
+    "dma_stall_cycles": 0,
+    "pool_backpressure_events": 108093,
+    "token_queue_high_water_banks": 3,
+    "dma_ready_high_water_banks": 1,
+    "host_recorder_cpu_percent": 16.528,
+    "kv260_sender_cpu_percent": 98.223
+  },
+  "recovery": {
+    "analyzer_restart": true,
+    "receiver_restart": true,
+    "ethernet_disconnect": true,
+    "fresh_run_required": true,
+    "silently_corrupted_complete_measurements": 0
+  },
+  "report": {
+    "path": "host/acceptance/images/dp5d-kv260-accepted.png",
+    "sha256": "76748b93c5358d44a303962a077bc81923d8ca9b8182b42e9003441cad5784d2"
+  }
+}

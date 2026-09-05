@@ -41,6 +41,19 @@ Plane v1, recording, and analysis contracts. This makes the demonstration
 relevant to pulsed radar, LiDAR, quantum readout, ultrasound, and laboratory
 response measurement without claiming a completed analogue front end.
 
+Networked Pulsed-IQ Analyzer v1 is **ACCEPTED** on real KV260 hardware. Its
+five-minute qualification captured 108,167 complete measurements and verified
+443,052,032 IQ words against the bit-accurate model with no incomplete shots,
+packet loss, skipped triggers, DMA errors, or model mismatches. Analyzer and
+receiver restart plus Ethernet disconnect/recovery tests also passed without
+publishing silently corrupted COMPLETE data.
+
+![Accepted Q-Crate Networked Pulsed-IQ Analyzer](host/acceptance/images/dp5d-kv260-accepted.png)
+
+The normalized [DP-5D evidence](host/acceptance/evidence/dp5d-kv260-accepted.json)
+and [acceptance procedure](host/acceptance/README.md) preserve the measured
+result and its reproduction steps.
+
 ## Validated DSP capture
 
 ![Q-Crate KV260 DSP-2B capture](host/dsp_model/images/kv260_dsp2b_capture.png)
@@ -93,6 +106,7 @@ config/                   reproducible FPGA build configuration
 host/sequence_compiler/   JSON-to-QSEQ compiler and host tests
 host/data_plane/          host codec, finite-shot UDP receiver, journal, and replay
 host/analyzer/            repeated-shot QIDX reader and IQ analysis GUI
+host/acceptance/          soak, recovery, telemetry, and instrument verdict tooling
 host/dsp_model/           DSP numerical contract, generated tables, and tests
 rtl/dsp/                  portable NCO/DDC/FIR RTL and shared numerical tables
 rtl/tb/                   portable RTL self-checking testbenches
@@ -126,6 +140,7 @@ are kept beside the subsystem they describe:
 - [Data Plane v1 wire protocol](common/data_plane/README.md)
 - [host receiver and capture bundle](host/data_plane/README.md)
 - [repeated-shot run analyzer](host/analyzer/README.md)
+- [DP-5D instrument acceptance](host/acceptance/README.md)
 - [KV260 finite-shot UDP sender](kv260/linux/data_plane/README.md)
 - [historical Kria Ubuntu and `xmutil` bring-up](kv260/linux/README.md)
 

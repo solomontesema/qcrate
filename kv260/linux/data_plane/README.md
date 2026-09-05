@@ -24,9 +24,17 @@ qcrate_dma coherent mmap (read-only userspace view)
 
 The no-option behavior remains the permanent one-shot regression: DMA finishes
 before transmission starts. `--triggered-shots N` selects DP-5C1 and overlaps
-acquisition of later banks with transmission of earlier banks. DP-5C1 is
-implemented and host-compiled; its KV260 acceptance is documented below and
-must pass before this status is promoted to accepted.
+acquisition of later banks with transmission of earlier banks. The sustained
+path has been accepted on KV260 with 100 hardware-triggered shots and 1,801
+datagrams received without kernel drops.
+
+DP-5D adds `--duration-seconds N` as an alternative to
+`--triggered-shots N`. The duration is measured around repeated acquisition,
+not process startup; the last accepted shot is completed before the queue is
+drained and END_OF_STREAM is sent. `--report-json PATH` atomically records
+producer timing, CPU, queue high-water, DMA stalls/errors, backpressure, skipped
+triggers, and packet totals. The report is operational evidence and does not
+change Data Plane v1.
 
 ## Ownership Model
 
@@ -191,6 +199,20 @@ This performs strict `-Wall -Wextra -Werror` C builds for the protocol,
 packetizer, and complete sender, then runs the C packet-splitting test and all
 Python codec, receiver, journal, fault-injection, and profile-identity tests.
 It does not access the DMA device or start AMD tools.
+
+The DP-5D board command used by the host orchestrator is equivalent to:
+
+```bash
+sudo qcrate-streamer \
+  --destination 192.168.1.92 \
+  --duration-seconds 300 \
+  --banks 4 \
+  --rate-mbps 420 \
+  --report-json /tmp/qcrate-dp5d-sender.json
+```
+
+See [DP-5D instrument acceptance](../../../host/acceptance/README.md) for the
+complete host command, fault procedures, and verdict criteria.
 
 ## PetaLinux Build And Deployment
 
@@ -358,7 +380,8 @@ With the default four-frame profile, acceptance requires:
   plus one terminal heartbeat);
 - nonzero, increasing hardware shot IDs and first-sample timestamps;
 - separate token-queue and DMA READY-queue high-water values;
-- zero pool starvation and skipped triggers;
+- zero skipped triggers and DMA errors; pool starvation/backpressure is reported
+  separately and does not imply loss in the software-triggered mode;
 - no DMA, RCU-stall, remoteproc, or RPMsg errors in `dmesg`.
 
 Finally rerun the one-shot receiver procedure above. It proves that adding the

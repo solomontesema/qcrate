@@ -221,6 +221,13 @@ class RecorderIntegrationTests(unittest.TestCase):
         self.assertEqual(manifest["stream"]["payload_format"], 2)
         self.assertEqual(manifest["stream"]["sample_rate_numerator"], 12_500_000)
         self.assertEqual(manifest["stream"]["timestamp_rate_numerator"], 200_000_000)
+        self.assertGreater(manifest["timing"]["duration_seconds"], 0)
+        self.assertGreaterEqual(manifest["timing"]["process_cpu_percent"], 0)
+        self.assertGreater(manifest["performance"]["shot_rate_hz"], 0)
+        self.assertEqual(
+            manifest["datagram_bytes_journaled"],
+            sum(len(datagram) for shot in shots for datagram in shot) + len(terminal),
+        )
 
     def test_missing_packet_is_indexed_without_sample_publication(self) -> None:
         shots, payloads, terminal = build_run()

@@ -89,6 +89,24 @@ class RunReaderTests(unittest.TestCase):
             self.assertEqual(bundle.incomplete_shots[0].issue_names, ("missing",))
             self.assertEqual(bundle.read_samples(bundle.shots[2]), bytes(range(16, 32)))
             self.assertEqual(bundle.sample_rate_hz(), (12_500_000.0, "run metadata"))
+            health = bundle.health()
+            self.assertEqual(health.state, "failed")
+            self.assertEqual(health.complete_shots, 2)
+            self.assertEqual(health.incomplete_shots, 1)
+            self.assertFalse(health.integrity_ok)
+
+    def test_live_reader_accepts_index_before_first_datagram(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            root.mkdir()
+            (root / "samples.iq16").write_bytes(b"")
+            (root / "shots.qidx").write_bytes(b"")
+            bundle = qcrate_run.RunBundle.open(root, allow_in_progress=True)
+            self.assertEqual((bundle.run_id, bundle.stream_id), (0, 0))
+            self.assertEqual(bundle.shots, ())
+            self.assertEqual(bundle.health().state, "recording")
+            with self.assertRaisesRegex(ValueError, "header is truncated"):
+                qcrate_run.RunBundle.open(root)
 
     def test_rejects_extent_beyond_sample_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -107,6 +125,31 @@ class RunReaderTests(unittest.TestCase):
             (root / "run.json").write_text(json.dumps(manifest))
             bundle = qcrate_run.RunBundle.open(root)
             self.assertEqual(bundle.sample_rate_hz(12_500_000), (12_500_000.0, "fallback"))
+
+    def test_loads_identity_matched_sender_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "run"
+            self.make_run(root)
+            (root / "sender.json").write_text(json.dumps({
+                "format": "qcrate-sender-report-v1",
+                "complete": True,
+                "run_id": "0x12",
+                "stream_id": "0x3",
+                "timing": {"process_cpu_percent": 4.25},
+                "health": {
+                    "token_queue_high_water": 2,
+                    "dma_ready_high_water": 1,
+                    "dma_stall_cycles": 7,
+                    "missed_triggers": 0,
+                    "starvation_events": 0,
+                    "skipped_triggers": 0,
+                    "dma_error_events": 0,
+                },
+            }))
+            health = qcrate_run.RunBundle.open(root).health()
+            self.assertEqual(health.token_queue_high_water, 2)
+            self.assertEqual(health.dma_stall_cycles, 7)
+            self.assertEqual(health.sender_cpu_percent, 4.25)
 
 
 if __name__ == "__main__":
