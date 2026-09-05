@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #ifndef QCRATE_DATA_PACKETIZER_H
 #define QCRATE_DATA_PACKETIZER_H
 

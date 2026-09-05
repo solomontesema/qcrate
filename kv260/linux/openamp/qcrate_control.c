@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 /*
  * Linux userspace client for the Q-Crate R5 FreeRTOS control service.
  *

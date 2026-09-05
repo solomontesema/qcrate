@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #define _POSIX_C_SOURCE 200809L
 
 #include "qcrate_rpmsg_client.h"

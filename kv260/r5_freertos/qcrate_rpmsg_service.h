@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #ifndef QCRATE_RPMSG_SERVICE_H
 #define QCRATE_RPMSG_SERVICE_H
 

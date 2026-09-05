@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #ifndef QCRATE_RUN_FORMAT_H
 #define QCRATE_RUN_FORMAT_H
 

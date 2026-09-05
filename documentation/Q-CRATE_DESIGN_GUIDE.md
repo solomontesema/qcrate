@@ -93,7 +93,7 @@ Modern instrumentation often needs the same combination of capabilities:
 Commercial platforms can solve these problems, but they often hide the details
 that an engineer needs to learn or constrain the system to a fixed workflow.
 Q-Crate approaches the problem from the opposite direction. It begins as an
-open engineering platform whose internal data path is deliberately understood,
+engineering platform whose internal data path is deliberately understood,
 implemented, measured, and documented.
 
 The name **Q-Crate** is currently a project name. The architecture is not tied

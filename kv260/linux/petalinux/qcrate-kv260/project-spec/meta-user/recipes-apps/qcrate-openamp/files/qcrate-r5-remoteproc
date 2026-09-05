@@ -1,5 +1,4 @@
 #!/bin/sh
-# SPDX-License-Identifier: MIT
 set -eu
 
 SERVICE_NAME="qcrate-control"

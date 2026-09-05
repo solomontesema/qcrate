@@ -1,7 +1,6 @@
 SUMMARY = "Q-Crate OpenAMP control service"
 DESCRIPTION = "Installs the R5-0 FreeRTOS firmware, remoteproc service, and rpmsg_char userspace client."
-LICENSE = "MIT"
-LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
+LICENSE = "CLOSED"
 
 PACKAGE_ARCH = "${MACHINE_ARCH}"
 # The firmware is a Cortex-R5 ELF intentionally carried in an AArch64 package.

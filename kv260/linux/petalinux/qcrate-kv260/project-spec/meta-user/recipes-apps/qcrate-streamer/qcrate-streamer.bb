@@ -1,7 +1,6 @@
 SUMMARY = "Q-Crate finite and sustained UDP data-plane sender"
 DESCRIPTION = "Transmits one-shot or R5-triggered DMA bank-pool captures using the versioned Q-Crate Data Plane v1 protocol."
-LICENSE = "MIT"
-LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
+LICENSE = "CLOSED"
 
 FILESEXTRAPATHS:prepend := "${THISDIR}/../../../../../../../../kv260/linux/data_plane:"
 FILESEXTRAPATHS:prepend := "${THISDIR}/../../../../../../../../common/data_plane:"

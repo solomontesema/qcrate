@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 
 #include "qcrate_data_protocol.h"

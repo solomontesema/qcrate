@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #include "qcrate_data_protocol.h"
 
 static void put_u16(uint8_t *output, uint16_t value)

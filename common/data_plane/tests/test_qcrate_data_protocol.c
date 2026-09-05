@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #include "qcrate_data_protocol.h"
 
 #include <stdio.h>

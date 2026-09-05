@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #include "qcrate_data_packetizer.h"
 
 #include <stdio.h>

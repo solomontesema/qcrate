@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 /*
  * Q-Crate KV260 Data Plane v1 sender.
  *

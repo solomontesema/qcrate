@@ -216,3 +216,12 @@ Q-Crate v1.0.0 establishes the reusable digital foundation. The next focused
 platform milestone is a hardware-independent acquisition-source contract,
 followed by integration only after a concrete physical ADC and measurement
 objective are selected.
+
+## License
+
+The Q-Crate repository as a whole is publicly source-visible but is not offered
+as open-source software or open hardware. Copyright © 2026 Solomon Negussie
+Tesema. All Rights Reserved. Public access grants no general right to
+reproduce, modify, redistribute, sublicense, or commercially exploit the
+project. Separately marked components retain their stated licenses. See the
+[Q-Crate Copyright and Use Notice](LICENSE.md) for the governing terms.

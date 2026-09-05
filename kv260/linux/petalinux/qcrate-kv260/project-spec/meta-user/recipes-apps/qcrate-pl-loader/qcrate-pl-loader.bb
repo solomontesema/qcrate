@@ -1,7 +1,6 @@
 SUMMARY = "Q-Crate fixed-platform FPGA Manager boot loader"
 DESCRIPTION = "Loads the XSA-derived Q-Crate bitstream and matching full device-tree overlay during boot."
-LICENSE = "MIT"
-LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
+LICENSE = "CLOSED"
 
 SRC_URI = "file://qcrate-load-pl \
            file://qcrate-pl-load.service \

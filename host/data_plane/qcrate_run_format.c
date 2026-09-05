@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #include "qcrate_run_format.h"
 
 #include <string.h>

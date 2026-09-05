@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 /*
  * Q-Crate R5-0 FreeRTOS control service.
  *

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #ifndef QCRATE_PROTOCOL_H
 #define QCRATE_PROTOCOL_H
 

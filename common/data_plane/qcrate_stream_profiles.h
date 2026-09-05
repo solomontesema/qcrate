@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: MIT */
 #ifndef QCRATE_STREAM_PROFILES_H
 #define QCRATE_STREAM_PROFILES_H
 
