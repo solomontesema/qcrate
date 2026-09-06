@@ -138,6 +138,7 @@ int qcrate_rpmsg_client_exchange(
 		errno = EINVAL;
 		return -1;
 	}
+	memset(response, 0, sizeof(*response));
 	request.magic = QCRATE_RPMSG_MAGIC;
 	request.abi_version = QCRATE_RPMSG_ABI_VERSION;
 	request.command = command;

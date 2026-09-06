@@ -21,6 +21,7 @@
 
 #include "platform_info.h"
 #include "qcrate_protocol.h"
+#include "qcrate_runtime_config.h"
 #include "qcrate_sequence_format.h"
 #include "rpmsg-echo.h"
 
@@ -63,6 +64,29 @@
 
 #define QCRATE_SEQ_COMMAND_TIMEOUT_MS 100U
 
+#define QCRATE_STREAM_FRAME_LENGTH    UINT32_C(0x1004)
+#define QCRATE_STREAM_FRAME_COUNT     UINT32_C(0x1008)
+#define QCRATE_STREAM_MODE            UINT32_C(0x100C)
+#define QCRATE_STREAM_STATUS          UINT32_C(0x1010)
+#define QCRATE_STREAM_MODE_DSP        UINT32_C(1)
+#define QCRATE_STREAM_HW_BUSY         UINT32_C(0x00000001)
+#define QCRATE_STREAM_HW_ARMED        UINT32_C(0x00000008)
+#define QCRATE_STREAM_HW_COMMAND_BUSY UINT32_C(0x00000100)
+
+#define QCRATE_DSP_COMMAND            UINT32_C(0x3000)
+#define QCRATE_DSP_STATUS             UINT32_C(0x3004)
+#define QCRATE_DSP_REJECT_REASON      UINT32_C(0x3008)
+#define QCRATE_DSP_ACTIVE_GENERATION  UINT32_C(0x300C)
+#define QCRATE_DSP_SHADOW_BASE        UINT32_C(0x3010)
+#define QCRATE_DSP_ACTIVE_BASE        UINT32_C(0x3040)
+#define QCRATE_DSP_COMMAND_COMMIT     UINT32_C(0x00000001)
+#define QCRATE_DSP_COMMAND_DISCARD    UINT32_C(0x00000002)
+#define QCRATE_DSP_STATUS_DIRTY       UINT32_C(0x00000001)
+#define QCRATE_DSP_STATUS_BUSY        UINT32_C(0x00000002)
+#define QCRATE_DSP_STATUS_VALID       UINT32_C(0x00000004)
+#define QCRATE_DSP_STATUS_REJECTED    UINT32_C(0x00000008)
+#define QCRATE_DSP_COMMIT_TIMEOUT_MS  100U
+
 #define QCRATE_INFO_WORDS           6U
 #define QCRATE_SCRATCH_RESULT_WORDS 5U
 #define QCRATE_R5_STATS_WORDS       4U
@@ -86,6 +110,15 @@ struct qcrate_sequence_load_state {
 
 static struct qcrate_sequence_load_state qcrate_sequence_load;
 
+struct qcrate_config_state {
+	bool staged;
+	bool validated;
+	uint32_t reason;
+	uint32_t words[QCRATE_CONFIG_STAGE_WORDS];
+};
+
+static struct qcrate_config_state qcrate_config;
+
 static uint32_t qcrate_reg_read(uint32_t offset)
 {
 	return Xil_In32((UINTPTR)(QCRATE_APB_BASE + offset));
@@ -94,6 +127,73 @@ static uint32_t qcrate_reg_read(uint32_t offset)
 static void qcrate_reg_write(uint32_t offset, uint32_t value)
 {
 	Xil_Out32((UINTPTR)(QCRATE_APB_BASE + offset), value);
+}
+
+static void qcrate_config_status_payload(struct qcrate_rpmsg_message *response)
+{
+	uint32_t generation_before;
+	uint32_t generation_after;
+	uint32_t flags = 0U;
+	uint32_t attempt;
+
+	if (qcrate_config.staged)
+		flags |= QCRATE_CONFIG_FLAG_STAGED;
+	if (qcrate_config.validated)
+		flags |= QCRATE_CONFIG_FLAG_VALIDATED;
+
+	/* Generation bracketing keeps the multiword active snapshot coherent. */
+	for (attempt = 0U; attempt < 3U; attempt++) {
+		generation_before = qcrate_reg_read(QCRATE_DSP_ACTIVE_GENERATION);
+		response->payload[4] = qcrate_reg_read(QCRATE_DSP_ACTIVE_BASE);
+		response->payload[5] = qcrate_reg_read(QCRATE_DSP_ACTIVE_BASE + 4U);
+		response->payload[6] = qcrate_reg_read(QCRATE_DSP_ACTIVE_BASE + 8U);
+		response->payload[7] = qcrate_reg_read(QCRATE_DSP_ACTIVE_BASE + 28U);
+		generation_after = qcrate_reg_read(QCRATE_DSP_ACTIVE_GENERATION);
+		if (generation_before == generation_after)
+			break;
+	}
+
+	response->payload_words = QCRATE_CONFIG_STATUS_WORDS;
+	response->payload[0] = flags;
+	response->payload[1] = qcrate_reg_read(QCRATE_DSP_STATUS);
+	response->payload[2] = qcrate_reg_read(QCRATE_DSP_REJECT_REASON);
+	response->payload[3] = generation_after;
+	response->payload[8] = qcrate_reg_read(QCRATE_STREAM_FRAME_LENGTH);
+	response->payload[9] = qcrate_reg_read(QCRATE_STREAM_FRAME_COUNT);
+	response->payload[10] = qcrate_config.reason;
+}
+
+static void qcrate_config_error(struct qcrate_rpmsg_message *response,
+				int32_t status, uint32_t reason)
+{
+	qcrate_config.reason = reason;
+	response->status = status;
+	qcrate_config_status_payload(response);
+}
+
+static int qcrate_config_wait_for_commit(uint32_t generation_before)
+{
+	TickType_t start;
+	TickType_t timeout;
+	uint32_t status;
+
+	start = xTaskGetTickCount();
+	timeout = pdMS_TO_TICKS(QCRATE_DSP_COMMIT_TIMEOUT_MS);
+	if (timeout == 0U)
+		timeout = 1U;
+
+	for (;;) {
+		status = qcrate_reg_read(QCRATE_DSP_STATUS);
+		if ((status & QCRATE_DSP_STATUS_REJECTED) != 0U)
+			return -2;
+		if ((status & QCRATE_DSP_STATUS_BUSY) == 0U &&
+		    qcrate_reg_read(QCRATE_DSP_ACTIVE_GENERATION) ==
+		    generation_before + UINT32_C(1))
+			return 0;
+		if ((TickType_t)(xTaskGetTickCount() - start) >= timeout)
+			return -1;
+		taskYIELD();
+	}
 }
 
 static uint32_t qcrate_crc32_word(uint32_t crc, uint32_t word)
@@ -578,6 +678,207 @@ static void qcrate_handle_seq_reset(
 		qcrate_sequence_wait(QCRATE_SEQ_WAIT_IDLE, 0U));
 }
 
+static void qcrate_handle_config_stage(
+	const struct qcrate_rpmsg_message *request,
+	struct qcrate_rpmsg_message *response)
+{
+	if (request->payload_words != QCRATE_CONFIG_STAGE_WORDS) {
+		response->status = QCRATE_STATUS_BAD_LENGTH;
+		return;
+	}
+
+	memcpy(qcrate_config.words, request->payload,
+	       sizeof(qcrate_config.words));
+	qcrate_config.staged = true;
+	qcrate_config.validated = false;
+	qcrate_config.reason = QCRATE_CONFIG_REASON_NONE;
+	qcrate_config_status_payload(response);
+}
+
+static void qcrate_handle_config_validate(
+	const struct qcrate_rpmsg_message *request,
+	struct qcrate_rpmsg_message *response)
+{
+	uint32_t reason;
+
+	if (request->payload_words != 0U) {
+		response->status = QCRATE_STATUS_BAD_LENGTH;
+		return;
+	}
+	if (!qcrate_config.staged) {
+		qcrate_config_error(response, QCRATE_STATUS_BAD_STATE,
+			QCRATE_CONFIG_REASON_NOT_STAGED);
+		return;
+	}
+
+	reason = qcrate_validate_runtime_config(qcrate_config.words);
+	qcrate_config.validated = reason == QCRATE_CONFIG_REASON_NONE;
+	qcrate_config.reason = reason;
+	if (!qcrate_config.validated)
+		response->status = QCRATE_STATUS_BAD_CONFIG;
+	qcrate_config_status_payload(response);
+}
+
+static void qcrate_config_restore_stream(const uint32_t *previous)
+{
+	qcrate_reg_write(QCRATE_STREAM_FRAME_LENGTH, previous[0]);
+	qcrate_reg_write(QCRATE_STREAM_FRAME_COUNT, previous[1]);
+	qcrate_reg_write(QCRATE_STREAM_MODE, previous[2]);
+}
+
+static void qcrate_handle_config_commit(
+	const struct qcrate_rpmsg_message *request,
+	struct qcrate_rpmsg_message *response)
+{
+	uint32_t previous_stream[3];
+	uint32_t sequence_status;
+	uint32_t stream_status;
+	uint32_t generation_before;
+	uint32_t index;
+	int wait_status;
+
+	if (request->payload_words != 0U) {
+		response->status = QCRATE_STATUS_BAD_LENGTH;
+		return;
+	}
+	if (!qcrate_config.staged || !qcrate_config.validated) {
+		qcrate_config_error(response, QCRATE_STATUS_BAD_STATE,
+			QCRATE_CONFIG_REASON_NOT_STAGED);
+		return;
+	}
+	qcrate_config.reason = qcrate_validate_runtime_config(qcrate_config.words);
+	if (qcrate_config.reason != QCRATE_CONFIG_REASON_NONE) {
+		qcrate_config.validated = false;
+		qcrate_config_error(response, QCRATE_STATUS_BAD_CONFIG,
+			qcrate_config.reason);
+		return;
+	}
+
+	sequence_status = qcrate_reg_read(QCRATE_SEQ_STATUS);
+	if (qcrate_sequence_load.active ||
+	    (sequence_status & (QCRATE_SEQ_HW_IDLE |
+		QCRATE_SEQ_HW_COMMAND_BUSY | QCRATE_SEQ_HW_MEMORY_LOCKED |
+		QCRATE_SEQ_HW_FAULTED)) != QCRATE_SEQ_HW_IDLE) {
+		qcrate_config_error(response, QCRATE_STATUS_BAD_STATE,
+			QCRATE_CONFIG_REASON_SEQUENCE_STATE);
+		return;
+	}
+	stream_status = qcrate_reg_read(QCRATE_STREAM_STATUS);
+	if ((stream_status & (QCRATE_STREAM_HW_BUSY | QCRATE_STREAM_HW_ARMED |
+		QCRATE_STREAM_HW_COMMAND_BUSY)) != 0U) {
+		qcrate_config_error(response, QCRATE_STATUS_BAD_STATE,
+			QCRATE_CONFIG_REASON_STREAM_STATE);
+		return;
+	}
+	if ((qcrate_reg_read(QCRATE_DSP_STATUS) & QCRATE_DSP_STATUS_BUSY) != 0U) {
+		qcrate_config_error(response, QCRATE_STATUS_BAD_STATE,
+			QCRATE_CONFIG_REASON_PL_REJECTED);
+		return;
+	}
+
+	previous_stream[0] = qcrate_reg_read(QCRATE_STREAM_FRAME_LENGTH);
+	previous_stream[1] = qcrate_reg_read(QCRATE_STREAM_FRAME_COUNT);
+	previous_stream[2] = qcrate_reg_read(QCRATE_STREAM_MODE);
+	qcrate_reg_write(QCRATE_STREAM_FRAME_LENGTH,
+		qcrate_config.words[QCRATE_CONFIG_FRAME_LENGTH_WORD]);
+	qcrate_reg_write(QCRATE_STREAM_FRAME_COUNT,
+		qcrate_config.words[QCRATE_CONFIG_FRAME_COUNT_WORD]);
+	qcrate_reg_write(QCRATE_STREAM_MODE, QCRATE_STREAM_MODE_DSP);
+	if (qcrate_reg_read(QCRATE_STREAM_FRAME_LENGTH) !=
+		qcrate_config.words[QCRATE_CONFIG_FRAME_LENGTH_WORD] ||
+	    qcrate_reg_read(QCRATE_STREAM_FRAME_COUNT) !=
+		qcrate_config.words[QCRATE_CONFIG_FRAME_COUNT_WORD] ||
+	    qcrate_reg_read(QCRATE_STREAM_MODE) != QCRATE_STREAM_MODE_DSP) {
+		qcrate_config_restore_stream(previous_stream);
+		qcrate_config_error(response, QCRATE_STATUS_CONFIG_VERIFY,
+			QCRATE_CONFIG_REASON_SHADOW_VERIFY);
+		return;
+	}
+
+	/* Clear a prior rejection and restore a known shadow baseline first. */
+	qcrate_reg_write(QCRATE_DSP_COMMAND, QCRATE_DSP_COMMAND_DISCARD);
+	for (index = 0U; index < 9U; index++)
+		qcrate_reg_write(QCRATE_DSP_SHADOW_BASE + index * 4U,
+			qcrate_config.words[index]);
+	for (index = 0U; index < 9U; index++) {
+		if (qcrate_reg_read(QCRATE_DSP_SHADOW_BASE + index * 4U) !=
+		    qcrate_config.words[index]) {
+			qcrate_reg_write(QCRATE_DSP_COMMAND,
+				QCRATE_DSP_COMMAND_DISCARD);
+			qcrate_config_restore_stream(previous_stream);
+			qcrate_config_error(response, QCRATE_STATUS_CONFIG_VERIFY,
+				QCRATE_CONFIG_REASON_SHADOW_VERIFY);
+			return;
+		}
+	}
+
+	generation_before = qcrate_reg_read(QCRATE_DSP_ACTIVE_GENERATION);
+	qcrate_reg_write(QCRATE_DSP_COMMAND, QCRATE_DSP_COMMAND_COMMIT);
+	wait_status = qcrate_config_wait_for_commit(generation_before);
+	if (wait_status != 0) {
+		if (wait_status == -2) {
+			qcrate_reg_write(QCRATE_DSP_COMMAND,
+				QCRATE_DSP_COMMAND_DISCARD);
+			qcrate_config_restore_stream(previous_stream);
+		}
+		qcrate_config_error(response,
+			wait_status == -2 ? QCRATE_STATUS_CONFIG_REJECTED :
+			QCRATE_STATUS_TIMEOUT,
+			wait_status == -2 ? QCRATE_CONFIG_REASON_PL_REJECTED :
+			QCRATE_CONFIG_REASON_COMMIT_TIMEOUT);
+		return;
+	}
+
+	for (index = 0U; index < 9U; index++) {
+		if (qcrate_reg_read(QCRATE_DSP_ACTIVE_BASE + index * 4U) !=
+		    qcrate_config.words[index]) {
+			qcrate_config_error(response, QCRATE_STATUS_CONFIG_VERIFY,
+				QCRATE_CONFIG_REASON_ACTIVE_VERIFY);
+			return;
+		}
+	}
+	if ((qcrate_reg_read(QCRATE_DSP_STATUS) &
+	     (QCRATE_DSP_STATUS_DIRTY | QCRATE_DSP_STATUS_BUSY |
+	      QCRATE_DSP_STATUS_VALID | QCRATE_DSP_STATUS_REJECTED)) !=
+	    QCRATE_DSP_STATUS_VALID) {
+		qcrate_config_error(response, QCRATE_STATUS_CONFIG_VERIFY,
+			QCRATE_CONFIG_REASON_ACTIVE_VERIFY);
+		return;
+	}
+
+	qcrate_config.reason = QCRATE_CONFIG_REASON_NONE;
+	qcrate_config_status_payload(response);
+}
+
+static void qcrate_handle_config_get_status(
+	const struct qcrate_rpmsg_message *request,
+	struct qcrate_rpmsg_message *response)
+{
+	if (request->payload_words != 0U) {
+		response->status = QCRATE_STATUS_BAD_LENGTH;
+		return;
+	}
+	qcrate_config_status_payload(response);
+}
+
+static void qcrate_handle_config_recover(
+	const struct qcrate_rpmsg_message *request,
+	struct qcrate_rpmsg_message *response)
+{
+	if (request->payload_words != 0U) {
+		response->status = QCRATE_STATUS_BAD_LENGTH;
+		return;
+	}
+	if ((qcrate_reg_read(QCRATE_DSP_STATUS) & QCRATE_DSP_STATUS_BUSY) != 0U) {
+		qcrate_config_error(response, QCRATE_STATUS_BAD_STATE,
+			QCRATE_CONFIG_REASON_COMMIT_TIMEOUT);
+		return;
+	}
+	qcrate_reg_write(QCRATE_DSP_COMMAND, QCRATE_DSP_COMMAND_DISCARD);
+	memset(&qcrate_config, 0, sizeof(qcrate_config));
+	qcrate_config_status_payload(response);
+}
+
 static void qcrate_handle_request(const struct qcrate_rpmsg_message *request,
 				  struct qcrate_rpmsg_message *response)
 {
@@ -632,6 +933,21 @@ static void qcrate_handle_request(const struct qcrate_rpmsg_message *request,
 		break;
 	case QCRATE_CMD_SEQ_RESET:
 		qcrate_handle_seq_reset(request, response);
+		break;
+	case QCRATE_CMD_CONFIG_STAGE:
+		qcrate_handle_config_stage(request, response);
+		break;
+	case QCRATE_CMD_CONFIG_VALIDATE:
+		qcrate_handle_config_validate(request, response);
+		break;
+	case QCRATE_CMD_CONFIG_COMMIT:
+		qcrate_handle_config_commit(request, response);
+		break;
+	case QCRATE_CMD_CONFIG_GET_STATUS:
+		qcrate_handle_config_get_status(request, response);
+		break;
+	case QCRATE_CMD_CONFIG_RECOVER:
+		qcrate_handle_config_recover(request, response);
 		break;
 	default:
 		response->status = QCRATE_STATUS_BAD_COMMAND;

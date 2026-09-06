@@ -37,6 +37,74 @@ class FlowError(RuntimeError):
     """A concise user-facing flow failure."""
 
 
+BUILD_ENVIRONMENT_KEYS = {
+    "AR",
+    "AS",
+    "CC",
+    "CFLAGS",
+    "CMAKE_PREFIX_PATH",
+    "CMAKE_TOOLCHAIN_FILE",
+    "CPP",
+    "CPPFLAGS",
+    "CXX",
+    "CXXFLAGS",
+    "LD",
+    "LDFLAGS",
+    "LD_LIBRARY_PATH",
+    "LIBRARY_PATH",
+    "NM",
+    "OBJCOPY",
+    "OBJDUMP",
+    "PKG_CONFIG_LIBDIR",
+    "PKG_CONFIG_PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "RANLIB",
+    "READELF",
+    "STRIP",
+}
+
+
+def clean_tool_environment(source: dict[str, str]) -> dict[str, str]:
+    """Remove host SDK state before AMD's settings script defines the tools."""
+    environment = source.copy()
+    prefixes: list[Path] = []
+    for key, value in source.items():
+        if key == "VIRTUAL_ENV" or key.startswith("CONDA_PREFIX"):
+            if value:
+                prefixes.append(Path(value).expanduser().resolve())
+    conda_exe = source.get("CONDA_EXE")
+    if conda_exe:
+        executable = Path(conda_exe).expanduser().resolve()
+        if len(executable.parents) >= 2:
+            prefixes.append(executable.parents[1])
+
+    def belongs_to_host_sdk(entry: str) -> bool:
+        try:
+            path = Path(entry).expanduser().resolve()
+            return any(
+                path == prefix or prefix in path.parents for prefix in prefixes
+            )
+        except OSError:
+            return False
+
+    path_entries = source.get("PATH", "").split(os.pathsep)
+    environment["PATH"] = os.pathsep.join(
+        entry
+        for entry in path_entries
+        if entry and not belongs_to_host_sdk(entry)
+    )
+    for key in tuple(environment):
+        if (
+            key in BUILD_ENVIRONMENT_KEYS
+            or key == "VIRTUAL_ENV"
+            or key.startswith("CONDA_")
+            or key.startswith("_CE_")
+        ):
+            environment.pop(key, None)
+    return environment
+
+
 def load_vitis_settings() -> Path:
     with BUILD_CONFIG.open(encoding="utf-8") as stream:
         config = json.load(stream)
@@ -60,9 +128,10 @@ def run_vitis_build() -> None:
     print("\n== Build R5-0 FreeRTOS/OpenAMP firmware ==", flush=True)
     print(f"- {command}", flush=True)
     subprocess.run(
-        ["bash", "-lc", command],
+        ["bash", "--noprofile", "--norc", "-c", command],
         cwd=REPO_ROOT,
         check=True,
+        env=clean_tool_environment(os.environ),
     )
 
 

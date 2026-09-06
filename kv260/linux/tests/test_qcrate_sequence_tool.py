@@ -139,7 +139,7 @@ class TargetFormatTests(unittest.TestCase):
 
 class ProtocolTests(unittest.TestCase):
     def test_rpmsg_message_remains_fixed_size(self) -> None:
-        self.assertEqual(target.RPMSG_ABI_VERSION, 2)
+        self.assertEqual(target.RPMSG_ABI_VERSION, 3)
         self.assertEqual(target.RPMSG_MESSAGE.size, 64)
 
     def test_r5_validation_error_names_event_and_fault(self) -> None:

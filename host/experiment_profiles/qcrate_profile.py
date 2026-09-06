@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
+import subprocess
 import sys
 import tempfile
 from decimal import Decimal, ROUND_HALF_UP
@@ -440,6 +442,42 @@ def _print_resolved(document: dict[str, Any]) -> None:
     print(f"baseband        : {document['dsp']['realized']['baseband_frequency_hz']} Hz")
 
 
+def configuration_command(document: dict[str, Any], control: str) -> list[str]:
+    """Convert one resolved document into the typed R5 configuration command."""
+    if document.get("format") != RESOLVED_FORMAT:
+        raise ProfileError(f"resolved format must be {RESOLVED_FORMAT!r}")
+    try:
+        config_id = int(document["identity"]["dsp_config_id"], 0)
+        active = document["dsp"]["active"]
+        acquisition = document["acquisition"]
+        values = [
+            config_id,
+            active["SIGNAL_PHASE_INCREMENT"],
+            active["SIGNAL_PHASE_INITIAL"],
+            active["SIGNAL_AMPLITUDE_Q1_15"],
+            active["NOISE_AMPLITUDE_Q1_15"],
+            active["NOISE_SEED"],
+            active["LO_PHASE_INCREMENT"],
+            active["LO_PHASE_INITIAL"],
+            acquisition["frame_length_words"],
+            acquisition["frame_count"],
+        ]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProfileError("resolved profile lacks a valid configuration bundle") from error
+    limits = [
+        (1, 0xFFFF_FFFF_FFFF_FFFF),
+        *((0, 0xFFFF_FFFF),) * 9,
+    ]
+    for index, (value, (minimum, maximum)) in enumerate(zip(values, limits)):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ProfileError(f"resolved configuration value {index} is not an integer")
+        if not minimum <= value <= maximum:
+            raise ProfileError(f"resolved configuration value {index} is out of range")
+    return [control, "config-apply", f"0x{config_id:016x}"] + [
+        f"0x{value:08x}" for value in values[1:8]
+    ] + [str(values[8]), str(values[9])]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -453,6 +491,16 @@ def main() -> int:
     )
     prove_parser.add_argument("profiles", nargs="+", type=Path)
     prove_parser.add_argument("--output", type=Path)
+    command_parser = subparsers.add_parser(
+        "command", help="print the typed qcrate-control command for a resolved profile"
+    )
+    command_parser.add_argument("resolved", type=Path)
+    command_parser.add_argument("--control", default="qcrate-control")
+    apply_parser = subparsers.add_parser(
+        "apply", help="apply a resolved profile through the R5-owned control API"
+    )
+    apply_parser.add_argument("resolved", type=Path)
+    apply_parser.add_argument("--control", default="qcrate-control")
     args = parser.parse_args()
 
     try:
@@ -469,12 +517,21 @@ def main() -> int:
             print("PASS distinct resolved configurations produced the predicted baseband shifts")
             return 0
 
+        if args.command in ("command", "apply"):
+            resolved = _load_json(args.resolved.resolve())
+            command = configuration_command(resolved, args.control)
+            if args.command == "command":
+                print(shlex.join(command))
+            else:
+                subprocess.run(command, check=True)
+            return 0
+
         resolved = compile_profile(args.profile.resolve())
         _print_resolved(resolved)
         if args.command == "compile":
             _write_json(args.output.resolve(), resolved)
             print(f"wrote            : {args.output}")
-    except (OSError, ProfileError, ValueError) as error:
+    except (OSError, ProfileError, ValueError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
     return 0
 

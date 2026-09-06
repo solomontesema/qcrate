@@ -152,7 +152,7 @@ explicit and never queues a hidden deferred update.
 
 The stream engine snapshots the active 64-bit DSP configuration ID when a
 capture starts. The captured identity is returned at stream offsets `0x04c`
-and `0x050`, independently of later shadow edits. DP-6C will use this hardware
+and `0x050`, independently of later shadow edits. DP-6C uses this hardware
 boundary through R5 rather than granting Linux applications unrestricted
 semantic ownership.
 
@@ -160,3 +160,33 @@ For both the active and captured 64-bit identities, software reads the low
 word first; that access latches the corresponding high word for the following
 read. A coherent active-bundle inspection also reads `ACTIVE_GENERATION`
 before and after the fields and retries if the generation changed.
+
+## DP-6C R5-owned application
+
+DP-6C extends the fixed 64-byte RPMsg contract with typed stage, validate,
+commit, status, and recovery operations. R5 is the only normal writer of the
+DSP shadow page and verifies stream framing, every shadow word, PL acceptance,
+the active generation, and active readback. This preserves the profile
+lifecycle across Linux applications without making R5 a generic MMIO proxy.
+
+Convert a tracked resolved profile into the exact target command:
+
+```bash
+python3 host/experiment_profiles/qcrate_profile.py command \
+  host/experiment_profiles/examples/resolved/lo_29mhz.resolved.json
+```
+
+The output is a `qcrate-control config-apply` invocation containing the stable
+64-bit ID and the nine resolved DSP/acquisition values. It may be inspected,
+logged, or executed on the target. If this script and the resolved profile are
+present on the target, the equivalent direct operation is:
+
+```bash
+sudo python3 qcrate_profile.py apply lo_29mhz.resolved.json
+sudo qcrate-control config-status
+```
+
+Retuning is fail-closed: the sequence and stream engines must be idle, and a
+rejected or timed-out PL commit restores the previous stream geometry. Use
+`qcrate-control config-recover` to abandon a staged transaction explicitly;
+it never rolls back or modifies an already active configuration.

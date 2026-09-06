@@ -40,16 +40,22 @@ Register ownership is intentionally narrow:
 
 - SYS identity registers are readable by Linux and R5.
 - SYS scratch is diagnostic and is restored after the R5 test.
-- STREAM registers and AXI DMA remain owned by the Linux `qcrate-dma` path.
+- Active STREAM transfers and AXI DMA remain owned by the Linux `qcrate-dma`
+  path.
 - The entire SEQUENCE register page and event RAM are R5-owned. Linux uses the
   typed RPMsg commands and must not write that APB page directly.
 - DMA descriptors and buffers remain Linux-owned.
+- Runtime profile staging and DSP activation are R5-owned. R5 updates framing
+  only while the current Linux-owned stream is idle; DP-6D will make DMA run
+  orchestration consume the committed profile as one operation.
 
 ## Source and generated files
 
 Tracked source of truth:
 
 - `common/protocol/qcrate_protocol.h`: fixed 64-byte wire ABI.
+- `common/config/qcrate_runtime_config.[ch]`: testable semantic validation used
+  authoritatively by R5.
 - `common/sequence/qcrate_sequence_format.h`: shared event and fault contract.
 - `kv260/r5_freertos/`: Q-Crate FreeRTOS endpoint implementation.
 - `kv260/linux/openamp/qcrate_rpmsg_client.[ch]`: reusable validated Linux
@@ -179,6 +185,11 @@ Every request and response is exactly 64 bytes and contains:
 | `SEQ_START` | empty | current sequence status |
 | `SEQ_ABORT` | empty | current sequence status |
 | `SEQ_RESET` | empty | current sequence status |
+| `CONFIG_STAGE` | complete eleven-word resolved DSP/acquisition bundle | ownership and active-configuration status |
+| `CONFIG_VALIDATE` | empty | semantic-validation and active status |
+| `CONFIG_COMMIT` | empty | verified active ID, generation, tuning, and framing |
+| `CONFIG_GET_STATUS` | empty | R5 ownership plus coherent PL active status |
+| `CONFIG_RECOVER` | empty | discarded shadow transaction plus unchanged active status |
 
 Both processors are little-endian. Any future cross-endian target must add
 explicit wire conversion without changing the existing ABI silently.
@@ -201,8 +212,35 @@ R5 returns the eleven-word hardware status snapshot for status and lifecycle
 commands. Status bit 30 means an upload is active and bit 31 means R5 has a
 committed sequence. These two bits describe R5 ownership state and are not PL
 register bits. Upload errors invalidate the transaction; Linux must start again
-with `SEQ_LOAD_BEGIN`. The fixed message remains 64 bytes, but the wire ABI is
-version 2 because the command and status contract changed.
+with `SEQ_LOAD_BEGIN`. The fixed message remains 64 bytes. DP-6C advances the
+wire ABI to version 3 for the configuration command contract; old Linux and R5
+binaries therefore reject each other explicitly.
+
+### Runtime configuration ownership
+
+`CONFIG_STAGE` transfers exactly one resolved bundle into R5-owned RAM; it does
+not touch the PL. `CONFIG_VALIDATE` applies the authoritative semantic policy:
+nonzero identity and noise seed, valid Q1.15 amplitudes, bounded frame geometry,
+and at most one million output words. Linux-side profile checks improve error
+messages but do not replace this R5 validation.
+
+`CONFIG_COMMIT` is accepted only while both the sequencer and stream engine are
+idle and unlocked. R5 first snapshots the old stream geometry, then writes and
+reads back the new framing and all DSP shadow fields. It requests the existing
+PL atomic commit and waits with a fixed timeout. Success requires an incremented
+generation, active-valid status, unchanged field values, and an exact active-ID
+readback. A definite PL rejection discards the DSP shadow transaction and
+restores the old stream geometry. A timeout is deliberately treated as an
+unknown hardware outcome: R5 does not race a still-pending mailbox by rolling
+it back. The operator inspects status and uses explicit recovery after the
+mailbox becomes idle. An unexpected post-commit active mismatch is reported as
+a hard verification failure rather than mislabeled as success.
+
+The eleven-word status response contains R5 staged/validated flags, PL status
+and rejection reason, active generation and ID, active signal/LO tuning words,
+frame geometry, and the stable R5 reason code. `CONFIG_RECOVER` explicitly
+abandons an incomplete staged transaction without altering the active profile.
+No command is an unrestricted APB proxy.
 
 ### Worked extension: R5 service statistics
 
@@ -271,6 +309,12 @@ stage the ELF plus shared source inputs for BitBake:
 ```bash
 python3 kv260/vitis/vitis_flow.py all
 ```
+
+The launcher deliberately removes active Conda/virtual-environment paths and
+generic compiler, CMake, and linker overrides from its child environment before
+sourcing Vitis. Without this isolation, CMake can select Conda's `ninja` and
+inject an x86-64 `libstdc++.so` into the Cortex-R5 link. This cleanup affects
+only the Vitis subprocess; it does not deactivate or modify the caller's shell.
 
 Expected final staged files are:
 
@@ -344,6 +388,7 @@ sudo qcrate-control info
 sudo qcrate-control scratch-test 0xa5a55a5a
 sudo qcrate-control stats
 sudo qcrate-control test
+sudo qcrate-control config-status
 sudo qcrate-sequence status
 ```
 
@@ -393,6 +438,45 @@ clocks, the R5-0 remote processor running, and the `qcrate-control` RPMsg
 channel responsive. The R5-owned sequencer upload, CRC/readback, ARM, START,
 completion, and status path passed, and the existing Linux-owned DMA capture
 continued to pass.
+
+### DP-6C configuration acceptance
+
+On the development PC, compile both example profiles and emit their typed
+commands. This validates the JSON structure and keeps raw APB writes out of the
+normal operator path:
+
+```bash
+python3 host/experiment_profiles/qcrate_profile.py command \
+  host/experiment_profiles/examples/resolved/lo_29mhz.resolved.json
+python3 host/experiment_profiles/qcrate_profile.py command \
+  host/experiment_profiles/examples/resolved/lo_28_5mhz.resolved.json
+```
+
+Run each printed `sudo qcrate-control config-apply ...` command on the KV260,
+followed by:
+
+```bash
+sudo qcrate-control config-status
+```
+
+The first profile must report ID `0x5db4fb578b27b09f`, signal tuning
+`0x26666666`, LO tuning `0x251eb852`, and framing `1024 words x 4 frames`.
+The second must report ID `0xaf46287bb969ed24` and LO tuning `0x247ae148`.
+`active generation` must increase by one for each successful commit. Confirm
+that the existing owned paths remain intact:
+
+```bash
+sudo qcrate-control test
+sudo qcrate-sequence test ~/qcrate/two_channel_demo.qseq
+sudo qcrate-dma capture
+```
+
+This acceptance passed on KV260 with verified profile ID, tuning words,
+generation, framing, sequencer operation, and the existing DMA capture path.
+After committing a noncanonical runtime profile, the legacy DP-5D bit-exact
+check is expected to reject the resulting run as an unknown configuration ID.
+That refusal is fail-closed: DP-6D binds the resolved profile and matching
+numerical model to each recorded run before such data can pass verification.
 
 ## Failure diagnostics
 

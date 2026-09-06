@@ -34,7 +34,7 @@ EVENT = struct.Struct("<QII")
 RPMSG_SYSFS_CLASS = Path("/sys/class/rpmsg")
 RPMSG_SERVICE_NAME = "qcrate-control"
 RPMSG_MAGIC = 0x5152_4350
-RPMSG_ABI_VERSION = 2
+RPMSG_ABI_VERSION = 3
 RPMSG_PAYLOAD_WORDS = 11
 RPMSG_MESSAGE = struct.Struct("<IHHIIi11I")
 
@@ -61,6 +61,9 @@ R5_STATUS_NAMES = {
     -11: "PL event-memory verification failed",
     -12: "PL sequencer reported a fault",
     -13: "R5 timed out waiting for the PL sequencer",
+    -14: "invalid runtime configuration",
+    -15: "runtime configuration verification failed",
+    -16: "PL rejected the runtime configuration",
 }
 
 STATUS_IDLE = 1 << 0

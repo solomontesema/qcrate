@@ -57,8 +57,40 @@ def replace_template_application() -> None:
         source_dir / "qcrate_protocol.h",
     )
     shutil.copy2(
+        REPO_ROOT / "common" / "config" / "qcrate_runtime_config.h",
+        source_dir / "qcrate_runtime_config.h",
+    )
+    shutil.copy2(
+        REPO_ROOT / "common" / "config" / "qcrate_runtime_config.c",
+        source_dir / "qcrate_runtime_config.c",
+    )
+    shutil.copy2(
         REPO_ROOT / "common" / "sequence" / "qcrate_sequence_format.h",
         source_dir / "qcrate_sequence_format.h",
+    )
+
+    # AMD's OpenAMP target constructs a private source list explicitly. Entries
+    # copied into UserConfig.cmake are not added to the executable target.
+    cmake_file = source_dir / "CMakeLists.txt"
+    if not cmake_file.is_file():
+        raise RuntimeError(
+            f"generated OpenAMP CMake target is missing: {cmake_file}"
+        )
+
+    contents = cmake_file.read_text(encoding="utf-8")
+    anchor = 'list (APPEND _sources "${CMAKE_CURRENT_SOURCE_DIR}/${_app}.c")\n'
+    addition = (
+        anchor
+        + 'list (APPEND _sources '
+        + '"${CMAKE_CURRENT_SOURCE_DIR}/qcrate_runtime_config.c")\n'
+    )
+    if contents.count(anchor) != 1:
+        raise RuntimeError(
+            "generated OpenAMP CMake source list changed; review the template "
+            "before updating the guarded correction"
+        )
+    cmake_file.write_text(
+        contents.replace(anchor, addition, 1), encoding="utf-8"
     )
 
 

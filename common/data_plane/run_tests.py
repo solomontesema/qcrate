@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 COMMON = ROOT / "common" / "data_plane"
 PROTOCOL = ROOT / "common" / "protocol"
+CONFIG = ROOT / "common" / "config"
 OPENAMP = ROOT / "kv260" / "linux" / "openamp"
 
 
@@ -21,6 +22,25 @@ def main() -> int:
     if compiler is None:
         raise SystemExit("error: a C11 compiler named cc is required")
     with tempfile.TemporaryDirectory() as temporary:
+        config_test = Path(temporary) / "test_qcrate_runtime_config"
+        subprocess.run(
+            [
+                compiler,
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                f"-I{CONFIG}",
+                f"-I{PROTOCOL}",
+                str(CONFIG / "qcrate_runtime_config.c"),
+                str(CONFIG / "tests" / "test_qcrate_runtime_config.c"),
+                "-o",
+                str(config_test),
+            ],
+            check=True,
+            cwd=ROOT,
+        )
+        subprocess.run([str(config_test)], check=True, cwd=ROOT)
         executable = Path(temporary) / "test_qcrate_data_protocol"
         subprocess.run(
             [

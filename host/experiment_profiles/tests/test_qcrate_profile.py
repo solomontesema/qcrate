@@ -101,6 +101,19 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(len(offsets), len(set(offsets)))
         self.assertTrue(all(0x3000 <= offset < 0x4000 for offset in offsets))
 
+    def test_resolved_profile_maps_to_typed_r5_command(self) -> None:
+        command = profile.configuration_command(self.lo_29, "qcrate-control")
+        self.assertEqual(command[:3], [
+            "qcrate-control", "config-apply", "0x5db4fb578b27b09f"
+        ])
+        self.assertEqual(command[3], "0x26666666")
+        self.assertEqual(command[8], "0x251eb852")
+        self.assertEqual(command[-2:], ["1024", "4"])
+
+    def test_command_rejects_nonresolved_profile(self) -> None:
+        with self.assertRaises(profile.ProfileError):
+            profile.configuration_command({"format": "wrong"}, "qcrate-control")
+
 
 if __name__ == "__main__":
     unittest.main()
