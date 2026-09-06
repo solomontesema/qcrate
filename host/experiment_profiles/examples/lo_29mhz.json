@@ -1,0 +1,21 @@
+{
+  "format": "qcrate-experiment-profile-v1",
+  "name": "30 MHz source with 29 MHz LO",
+  "dsp": {
+    "signal_frequency_hz": 30000000,
+    "signal_phase_turns": 0,
+    "signal_amplitude": 0.75,
+    "noise_amplitude": 0.01,
+    "noise_seed": 44257,
+    "lo_frequency_hz": 29000000,
+    "lo_phase_turns": 0
+  },
+  "acquisition": {
+    "frame_length_words": 1024,
+    "frame_count": 4,
+    "stream_mode": "dsp"
+  },
+  "sequence": {
+    "source": "host/sequence_compiler/examples/two_channel_demo.json"
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Q-Crate experiment profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "name", "dsp", "acquisition", "sequence"],
+  "properties": {
+    "format": {
+      "const": "qcrate-experiment-profile-v1"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "dsp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signal_frequency_hz",
+        "signal_phase_turns",
+        "signal_amplitude",
+        "noise_amplitude",
+        "noise_seed",
+        "lo_frequency_hz",
+        "lo_phase_turns"
+      ],
+      "properties": {
+        "signal_frequency_hz": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000},
+        "signal_phase_turns": {"type": "number", "minimum": 0, "exclusiveMaximum": 1},
+        "signal_amplitude": {"type": "number", "minimum": 0, "maximum": 1},
+        "noise_amplitude": {"type": "number", "minimum": 0, "maximum": 1},
+        "noise_seed": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "lo_frequency_hz": {"type": "number", "minimum": 0, "exclusiveMaximum": 100000000},
+        "lo_phase_turns": {"type": "number", "minimum": 0, "exclusiveMaximum": 1}
+      }
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame_length_words", "frame_count", "stream_mode"],
+      "properties": {
+        "frame_length_words": {"type": "integer", "minimum": 1, "maximum": 262144},
+        "frame_count": {"type": "integer", "minimum": 1, "maximum": 255},
+        "stream_mode": {"const": "dsp"}
+      }
+    },
+    "sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

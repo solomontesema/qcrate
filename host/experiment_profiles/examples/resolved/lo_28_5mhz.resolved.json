@@ -1,0 +1,110 @@
+{
+  "acquisition": {
+    "frame_count": 4,
+    "frame_length_words": 1024,
+    "stream_mode": "dsp",
+    "stream_mode_value": 1
+  },
+  "dsp": {
+    "active": {
+      "LO_PHASE_INCREMENT": 612032840,
+      "LO_PHASE_INITIAL": 0,
+      "NOISE_AMPLITUDE_Q1_15": 328,
+      "NOISE_SEED": 44257,
+      "SIGNAL_AMPLITUDE_Q1_15": 24576,
+      "SIGNAL_PHASE_INCREMENT": 644245094,
+      "SIGNAL_PHASE_INITIAL": 0
+    },
+    "realized": {
+      "baseband_frequency_hz": "1499999.96647238731384277344",
+      "lo_frequency_hz": "28500000.01490116119384765625",
+      "signal_frequency_hz": "29999999.98137354850769042969"
+    },
+    "requested": {
+      "lo_frequency_hz": "28500000",
+      "lo_phase_turns": "0",
+      "noise_amplitude": "0.01",
+      "noise_seed": 44257,
+      "signal_amplitude": "0.75",
+      "signal_frequency_hz": "30000000",
+      "signal_phase_turns": "0"
+    }
+  },
+  "format": "qcrate-experiment-resolved-v1",
+  "identity": {
+    "dsp_config_id": "0xaf46287bb969ed24",
+    "dsp_config_sha256": "af46287bb969ed24fdef74bf3f6a9a74370cc2199d48cd4233b53b1bb9eb3ce1",
+    "profile_sha256": "9ef0a12b9af01dacfdeeb25e2c43e65e4a420eb00021a2d3d9b3df4e4ec3f627"
+  },
+  "name": "30 MHz source with 28.5 MHz LO",
+  "numerical_contract": {
+    "amplitude_format": "signed-q1.15",
+    "coefficient_format": "signed-q1.17",
+    "decimation": 16,
+    "fir_sha256": "0a0bf810b70a5f682a51046ec3d6d4529a5e6f7d6a883fb78e952f5b5fa2508e",
+    "fir_taps": 217,
+    "format": "qcrate-dsp-v1",
+    "mixer_format": "signed-q1.17",
+    "output_format": "complex-signed-q1.15",
+    "output_sample_rate_hz": 12500000,
+    "overflow": "signed-saturation",
+    "phase_bits": 32,
+    "rounding": "nearest-ties-away-from-zero",
+    "sample_rate_hz": 200000000,
+    "sine_sha256": "25b27e310ba59401e3f48ee68d7dc0c1a37ca9d70d3a59f3863d0e95c8799fee"
+  },
+  "register_writes": [
+    {
+      "name": "CONFIG_ID_LOW",
+      "offset": 12304,
+      "value": 3110726948
+    },
+    {
+      "name": "CONFIG_ID_HIGH",
+      "offset": 12308,
+      "value": 2940610683
+    },
+    {
+      "name": "SIGNAL_PHASE_INCREMENT",
+      "offset": 12312,
+      "value": 644245094
+    },
+    {
+      "name": "SIGNAL_PHASE_INITIAL",
+      "offset": 12316,
+      "value": 0
+    },
+    {
+      "name": "SIGNAL_AMPLITUDE_Q1_15",
+      "offset": 12320,
+      "value": 24576
+    },
+    {
+      "name": "NOISE_AMPLITUDE_Q1_15",
+      "offset": 12324,
+      "value": 328
+    },
+    {
+      "name": "NOISE_SEED",
+      "offset": 12328,
+      "value": 44257
+    },
+    {
+      "name": "LO_PHASE_INCREMENT",
+      "offset": 12332,
+      "value": 612032840
+    },
+    {
+      "name": "LO_PHASE_INITIAL",
+      "offset": 12336,
+      "value": 0
+    }
+  ],
+  "sequence": {
+    "event_count": 4,
+    "image_sha256": "5842c0994bb2f623b25f15289851d48cb64a3341558767461c62218d9fdab1c1",
+    "payload_crc32": 1537459985,
+    "source": "host/sequence_compiler/examples/two_channel_demo.json",
+    "tick_hz": 200000000
+  }
+}

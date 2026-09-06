@@ -41,6 +41,7 @@ FIR_TAPS = 217
 KAISER_BETA = 6.75526
 
 FORMAT_NAME = "qcrate-dsp-v1"
+RESOLVED_PROFILE_FORMAT = "qcrate-experiment-resolved-v1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TABLE_DIR = REPO_ROOT / "rtl" / "dsp" / "tables"
 SINE_TABLE = TABLE_DIR / "sine_quarter_q1_15.mem"
@@ -221,6 +222,91 @@ class DspConfig:
         return self.frame_length * self.frame_count
 
 
+def _validate_config(config: DspConfig) -> DspConfig:
+    """Apply the DSP v1 semantic constraints to either configuration format."""
+    if config.sample_rate_hz != SAMPLE_RATE_HZ or config.decimation != DECIMATION:
+        raise DspConfigurationError(
+            f"DSP v1 requires {SAMPLE_RATE_HZ} Hz and decimation {DECIMATION}"
+        )
+    if not 1 <= config.frame_length <= 262_144:
+        raise DspConfigurationError("frame_length must be between 1 and 262144")
+    if not 1 <= config.frame_count <= 255:
+        raise DspConfigurationError("frame_count must be between 1 and 255")
+    if config.output_samples > 1_000_000:
+        raise DspConfigurationError("total output words must not exceed 1000000")
+    nyquist = Decimal(config.sample_rate_hz) / 2
+    for name, frequency in (
+        ("signal_frequency_hz", config.signal_frequency_hz),
+        ("lo_frequency_hz", config.lo_frequency_hz),
+    ):
+        if frequency < 0 or frequency >= nyquist:
+            raise DspConfigurationError(f"{name} must be in [0, Nyquist)")
+    for name, value in (
+        ("signal_amplitude", config.signal_amplitude),
+        ("noise_amplitude", config.noise_amplitude),
+    ):
+        if value < 0 or value > 1:
+            raise DspConfigurationError(f"{name} must be between 0 and 1")
+    if config.signal_amplitude + config.noise_amplitude > 1:
+        raise DspConfigurationError("signal plus noise amplitude must not exceed 1")
+    if not 1 <= config.noise_seed <= 0xFFFF:
+        raise DspConfigurationError("noise_seed must be a nonzero 16-bit value")
+    return config
+
+
+def config_from_resolved_document(document: dict[str, Any]) -> DspConfig:
+    """Recover a model configuration and verify every resolved DSP integer."""
+    try:
+        if document["format"] != RESOLVED_PROFILE_FORMAT:
+            raise DspConfigurationError(
+                f"resolved format must be {RESOLVED_PROFILE_FORMAT!r}"
+            )
+        contract = document["numerical_contract"]
+        requested = document["dsp"]["requested"]
+        active = document["dsp"]["active"]
+        acquisition = document["acquisition"]
+        config = DspConfig(
+            sample_rate_hz=int(contract["sample_rate_hz"]),
+            decimation=int(contract["decimation"]),
+            frame_length=int(acquisition["frame_length_words"]),
+            frame_count=int(acquisition["frame_count"]),
+            signal_frequency_hz=Decimal(requested["signal_frequency_hz"]),
+            lo_frequency_hz=Decimal(requested["lo_frequency_hz"]),
+            signal_amplitude=Decimal(requested["signal_amplitude"]),
+            signal_phase_turns=Decimal(requested["signal_phase_turns"]),
+            lo_phase_turns=Decimal(requested["lo_phase_turns"]),
+            noise_amplitude=Decimal(requested["noise_amplitude"]),
+            noise_seed=int(requested["noise_seed"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise DspConfigurationError(f"malformed resolved profile: {error}") from error
+
+    config = _validate_config(config)
+    expected = {
+        "SIGNAL_PHASE_INCREMENT": frequency_to_phase_word(
+            config.signal_frequency_hz, config.sample_rate_hz
+        ),
+        "SIGNAL_PHASE_INITIAL": turns_to_phase_word(config.signal_phase_turns),
+        "SIGNAL_AMPLITUDE_Q1_15": decimal_to_fixed(
+            config.signal_amplitude, ADC_BITS, ADC_FRAC_BITS
+        ),
+        "NOISE_AMPLITUDE_Q1_15": decimal_to_fixed(
+            config.noise_amplitude, ADC_BITS, ADC_FRAC_BITS
+        ),
+        "NOISE_SEED": config.noise_seed,
+        "LO_PHASE_INCREMENT": frequency_to_phase_word(
+            config.lo_frequency_hz, config.sample_rate_hz
+        ),
+        "LO_PHASE_INITIAL": turns_to_phase_word(config.lo_phase_turns),
+    }
+    for name, value in expected.items():
+        if active.get(name) != value:
+            raise DspConfigurationError(
+                f"resolved {name} is {active.get(name)!r}, expected {value}"
+            )
+    return config
+
+
 def load_config(path: Path) -> DspConfig:
     """Load and strictly validate one readable DSP experiment configuration."""
     with path.open("r", encoding="utf-8") as stream:
@@ -245,6 +331,8 @@ def load_config(path: Path) -> DspConfig:
     }
     if not isinstance(document, dict):
         raise DspConfigurationError("configuration root must be an object")
+    if document.get("format") == RESOLVED_PROFILE_FORMAT:
+        return config_from_resolved_document(document)
     unknown = set(document) - required
     missing = required - set(document)
     if unknown or missing:
@@ -279,34 +367,7 @@ def load_config(path: Path) -> DspConfig:
         noise_amplitude=Decimal(document["noise_amplitude"]),
         noise_seed=document["noise_seed"],
     )
-    if config.sample_rate_hz != SAMPLE_RATE_HZ or config.decimation != DECIMATION:
-        raise DspConfigurationError(
-            f"DSP v1 requires {SAMPLE_RATE_HZ} Hz and decimation {DECIMATION}"
-        )
-    if not 1 <= config.frame_length <= 262_144:
-        raise DspConfigurationError("frame_length must be between 1 and 262144")
-    if not 1 <= config.frame_count <= 255:
-        raise DspConfigurationError("frame_count must be between 1 and 255")
-    if config.output_samples > 1_000_000:
-        raise DspConfigurationError("total output words must not exceed 1000000")
-    nyquist = Decimal(config.sample_rate_hz) / 2
-    for name, frequency in (
-        ("signal_frequency_hz", config.signal_frequency_hz),
-        ("lo_frequency_hz", config.lo_frequency_hz),
-    ):
-        if frequency < 0 or frequency >= nyquist:
-            raise DspConfigurationError(f"{name} must be in [0, Nyquist)")
-    for name, value in (
-        ("signal_amplitude", config.signal_amplitude),
-        ("noise_amplitude", config.noise_amplitude),
-    ):
-        if value < 0 or value > 1:
-            raise DspConfigurationError(f"{name} must be between 0 and 1")
-    if config.signal_amplitude + config.noise_amplitude > 1:
-        raise DspConfigurationError("signal plus noise amplitude must not exceed 1")
-    if not 1 <= config.noise_seed <= 0xFFFF:
-        raise DspConfigurationError("noise_seed must be a nonzero 16-bit value")
-    return config
+    return _validate_config(config)
 
 
 def lfsr16_noise(count: int, seed: int) -> np.ndarray:

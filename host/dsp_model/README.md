@@ -1,5 +1,11 @@
 # Q-Crate DSP-0 reference model
 
+The model also accepts the exact resolved runtime profiles introduced by
+[DP-6A](../experiment_profiles/README.md). It verifies that every resolved NCO,
+phase, amplitude, and noise integer agrees with the human profile before using
+the configuration, so the modeled signal cannot silently differ from the
+future hardware register image.
+
 ## Objective
 
 Q-Crate ultimately needs to acquire a high-rate digitized waveform, select a

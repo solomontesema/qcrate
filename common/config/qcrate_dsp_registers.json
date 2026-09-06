@@ -1,0 +1,103 @@
+{
+  "format": "qcrate-dsp-register-contract-v1",
+  "page_offset": 12288,
+  "registers": {
+    "COMMAND": {
+      "access": "W1P",
+      "offset": 0
+    },
+    "STATUS": {
+      "access": "RO",
+      "offset": 4
+    },
+    "REJECT_REASON": {
+      "access": "RO",
+      "offset": 8
+    },
+    "ACTIVE_GENERATION": {
+      "access": "RO",
+      "offset": 12
+    }
+  },
+  "command_bits": {
+    "COMMIT": 0,
+    "DISCARD": 1
+  },
+  "status_bits": {
+    "SHADOW_DIRTY": 0,
+    "COMMIT_BUSY": 1,
+    "ACTIVE_VALID": 2,
+    "LAST_COMMIT_REJECTED": 3
+  },
+  "reject_reasons": {
+    "NONE": 0,
+    "RESERVED_BITS": 1,
+    "UNSAFE_STATE": 2,
+    "MAILBOX_BUSY": 3
+  },
+  "configuration_fields": [
+    {
+      "name": "CONFIG_ID_LOW",
+      "width": 32,
+      "reset_active": 2334634143,
+      "shadow_offset": 16,
+      "active_offset": 64
+    },
+    {
+      "name": "CONFIG_ID_HIGH",
+      "width": 32,
+      "reset_active": 1572141911,
+      "shadow_offset": 20,
+      "active_offset": 68
+    },
+    {
+      "name": "SIGNAL_PHASE_INCREMENT",
+      "width": 32,
+      "reset_active": 644245094,
+      "shadow_offset": 24,
+      "active_offset": 72
+    },
+    {
+      "name": "SIGNAL_PHASE_INITIAL",
+      "width": 32,
+      "reset_active": 0,
+      "shadow_offset": 28,
+      "active_offset": 76
+    },
+    {
+      "name": "SIGNAL_AMPLITUDE_Q1_15",
+      "width": 16,
+      "reset_active": 24576,
+      "shadow_offset": 32,
+      "active_offset": 80
+    },
+    {
+      "name": "NOISE_AMPLITUDE_Q1_15",
+      "width": 16,
+      "reset_active": 328,
+      "shadow_offset": 36,
+      "active_offset": 84
+    },
+    {
+      "name": "NOISE_SEED",
+      "width": 16,
+      "reset_active": 44257,
+      "shadow_offset": 40,
+      "active_offset": 88
+    },
+    {
+      "name": "LO_PHASE_INCREMENT",
+      "width": 32,
+      "reset_active": 622770258,
+      "shadow_offset": 44,
+      "active_offset": 92
+    },
+    {
+      "name": "LO_PHASE_INITIAL",
+      "width": 32,
+      "reset_active": 0,
+      "shadow_offset": 48,
+      "active_offset": 96
+    }
+  ]
+}

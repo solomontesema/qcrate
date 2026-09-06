@@ -141,6 +141,7 @@ milestone.
 | [R5/OpenAMP](kv260/linux/openamp/README.md) | Vitis firmware, remoteproc, RPMsg ABI, and R5 ownership |
 | [DSP RTL](rtl/dsp/README.md) | NCO, synthetic source, DDC, FIR, framing, and verification |
 | [DSP model](host/dsp_model/README.md) | Numerical contract, bit-accurate model, vectors, and capture viewer |
+| [Experiment profiles](host/experiment_profiles/README.md) | Runtime-profile contract, deterministic identities, and resolved DSP settings |
 | [Data Plane v1](common/data_plane/README.md) | Frozen binary UDP contract and cross-language codecs |
 | [Run format and recorder](host/data_plane/README.md) | Journal, QIDX, replay, and compiled sustained recorder |
 | [Analyzer](host/analyzer/README.md) | Live/offline IQ analysis and bounded-memory long-run navigation |
@@ -149,7 +150,7 @@ milestone.
 The repository layout follows those ownership boundaries:
 
 ```text
-common/             shared C wire formats and userspace ABIs
+common/             shared wire formats, register contracts, and userspace ABIs
 config/             reproducible FPGA build configuration
 rtl/                portable DSP RTL and self-checking testbenches
 kv260/hw/           KV260 block design, integration RTL, and hardware tests

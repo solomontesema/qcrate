@@ -1,0 +1,24 @@
+{
+  "format": "qcrate-dp6a-proof-v1",
+  "pass": true,
+  "profiles": [
+    {
+      "dsp_config_id": "0x5db4fb578b27b09f",
+      "fft_bin_hz": 3075.787401574803,
+      "lo_phase_increment": 622770258,
+      "model_peak_hz": 999630.9055118109,
+      "predicted_baseband_hz": 999999.9776482582,
+      "profile": "host/experiment_profiles/examples/lo_29mhz.json",
+      "profile_sha256": "a9d1c6cb55e4df83da413aa789ed2bea602aa21dc274682a3f727fc03b6459cf"
+    },
+    {
+      "dsp_config_id": "0xaf46287bb969ed24",
+      "fft_bin_hz": 3075.787401574803,
+      "lo_phase_increment": 612032840,
+      "model_peak_hz": 1500984.251968504,
+      "predicted_baseband_hz": 1499999.9664723873,
+      "profile": "host/experiment_profiles/examples/lo_28_5mhz.json",
+      "profile_sha256": "9ef0a12b9af01dacfdeeb25e2c43e65e4a420eb00021a2d3d9b3df4e4ec3f627"
+    }
+  ]
+}
