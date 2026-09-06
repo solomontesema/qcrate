@@ -22,6 +22,7 @@ module qcrate_apb_fabric #(
     output logic                         sys_psel_o,
     output logic                         stream_psel_o,
     output logic                         sequence_psel_o,
+    output logic                         dsp_config_psel_o,
 
     input  wire logic [APB_DATA_WIDTH-1:0]
                                          sys_prdata_i,
@@ -38,6 +39,11 @@ module qcrate_apb_fabric #(
     input  wire logic                    sequence_pready_i,
     input  wire logic                    sequence_pslverr_i,
 
+    input  wire logic [APB_DATA_WIDTH-1:0]
+                                         dsp_config_prdata_i,
+    input  wire logic                    dsp_config_pready_i,
+    input  wire logic                    dsp_config_pslverr_i,
+
     output logic [APB_DATA_WIDTH-1:0]    prdata_o,
     output logic                         pready_o,
     output logic                         pslverr_o
@@ -46,11 +52,12 @@ module qcrate_apb_fabric #(
     localparam logic [APB_DATA_WIDTH-1:0] UNMAPPED_PRDATA = 32'hDEAD_BEEF;
 
     typedef enum logic [2:0] {
-        SEL_NONE     = 3'b000,
-        SEL_SYS      = 3'b001,
-        SEL_STREAM   = 3'b010,
-        SEL_SEQUENCE = 3'b011,
-        SEL_UNMAPPED = 3'b100
+        SEL_NONE       = 3'b000,
+        SEL_SYS        = 3'b001,
+        SEL_STREAM     = 3'b010,
+        SEL_SEQUENCE   = 3'b011,
+        SEL_DSP_CONFIG = 3'b100,
+        SEL_UNMAPPED   = 3'b101
     } apb_sel_t;
 
     logic [3:0] page;
@@ -66,6 +73,7 @@ module qcrate_apb_fabric #(
                 4'h0: selected_q <= SEL_SYS;
                 4'h1: selected_q <= SEL_STREAM;
                 4'h2: selected_q <= SEL_SEQUENCE;
+                4'h3: selected_q <= SEL_DSP_CONFIG;
                 default: selected_q <= SEL_UNMAPPED;
             endcase
         end else if (!psel_i) begin
@@ -76,6 +84,7 @@ module qcrate_apb_fabric #(
     assign sys_psel_o = psel_i && (selected_q == SEL_SYS);
     assign stream_psel_o = psel_i && (selected_q == SEL_STREAM);
     assign sequence_psel_o = psel_i && (selected_q == SEL_SEQUENCE);
+    assign dsp_config_psel_o = psel_i && (selected_q == SEL_DSP_CONFIG);
 
     always_comb begin
         prdata_o = '0;
@@ -99,6 +108,12 @@ module qcrate_apb_fabric #(
                 prdata_o = sequence_prdata_i;
                 pready_o = sequence_pready_i;
                 pslverr_o = sequence_pslverr_i;
+            end
+
+            SEL_DSP_CONFIG: begin
+                prdata_o = dsp_config_prdata_i;
+                pready_o = dsp_config_pready_i;
+                pslverr_o = dsp_config_pslverr_i;
             end
 
             SEL_UNMAPPED: begin

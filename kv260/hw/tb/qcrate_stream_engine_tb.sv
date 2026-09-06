@@ -12,6 +12,7 @@ module qcrate_stream_engine_tb;
     logic        soft_reset;
     logic [31:0] trigger_shot_id;
     logic [63:0] timebase;
+    logic [63:0] config_id;
     logic [31:0] frame_length;
     logic [31:0] frame_count;
     logic [31:0] stream_mode;
@@ -32,6 +33,7 @@ module qcrate_stream_engine_tb;
     logic [31:0] missed_trigger_count;
     logic [63:0] trigger_time;
     logic [63:0] first_sample_time;
+    logic [63:0] capture_config_id;
     logic [31:0] completed_frames;
     logic [31:0] current_frame_id;
     logic [31:0] current_sample_index;
@@ -55,6 +57,7 @@ module qcrate_stream_engine_tb;
         .soft_reset_i               (soft_reset),
         .trigger_shot_id_i          (trigger_shot_id),
         .timebase_i                 (timebase),
+        .config_id_i                (config_id),
 
         .frame_length_i             (frame_length),
         .frame_count_i              (frame_count),
@@ -79,6 +82,7 @@ module qcrate_stream_engine_tb;
         .missed_trigger_count_o     (missed_trigger_count),
         .trigger_time_o             (trigger_time),
         .first_sample_time_o        (first_sample_time),
+        .capture_config_id_o        (capture_config_id),
 
         .completed_frames_o         (completed_frames),
         .current_frame_id_o         (current_frame_id),
@@ -143,6 +147,7 @@ module qcrate_stream_engine_tb;
         abort = 1'b0;
         soft_reset = 1'b0;
         trigger_shot_id = 32'h0000_0000;
+        config_id = 64'h5db4_fb57_8b27_b09f;
         frame_length = 32'h0000_0000;
         frame_count = 32'h0000_0000;
         stream_mode = 32'h0000_0000;
@@ -236,6 +241,8 @@ module qcrate_stream_engine_tb;
         expect_bit(dsp_enable, 1'b0, "reset DSP enable");
         expect_bit(dsp_tready, 1'b0, "reset DSP ready");
         expect_word({28'd0, tkeep}, 32'h0000_000F, "reset TKEEP");
+        if (capture_config_id !== 64'd0)
+            fail("reset capture configuration ID is not zero");
 
         frame_length = 32'd1;
         frame_count = 32'd1;
@@ -254,6 +261,8 @@ module qcrate_stream_engine_tb;
                    "immediate capture first-sample timestamp valid");
         expect_bit(trigger_seen, 1'b0,
                    "immediate capture has no hardware trigger");
+        if (capture_config_id !== config_id)
+            fail("immediate capture did not snapshot configuration ID");
         @(posedge clk);
         #1;
         expect_bit(done_pulse, 1'b0, "one-word done pulse clears");
@@ -358,6 +367,7 @@ module qcrate_stream_engine_tb;
         frame_count = 32'd1;
         continuous = 1'b0;
         trigger_shot_id = 32'd7;
+        config_id = 64'h0123_4567_89ab_cdef;
 
         pulse_shot_trigger();
         expect_word(missed_trigger_count, 32'd1,
@@ -385,6 +395,8 @@ module qcrate_stream_engine_tb;
         expect_word(accepted_trigger_shot_id, 32'd7,
                     "accepted trigger shot identity");
         expect_word(trigger_count, 32'd1, "accepted trigger count");
+        if (capture_config_id !== config_id)
+            fail("triggered capture did not snapshot configuration ID");
         if (trigger_time !== expected_trigger_time)
             fail("trigger timestamp does not match acceptance cycle");
 

@@ -155,6 +155,22 @@ both inputs permanently asserts the active-low auxiliary reset. The resulting
 hardware symptom is an AXI master holding `ARVALID=1` while the reset
 SmartConnect holds `ARREADY=0`, causing a Linux `/dev/mem` read to wait forever.
 
+### Reset-domain ownership
+
+The block design owns reset conditioning. `proc_sys_reset_0` is clocked by the
+200 MHz `pl_clk0` stream clock and generates `pl_arstn0`; `proc_sys_reset_1` is
+clocked by the 100 MHz `pl_clk1` control clock and generates `pl_arstn1`.
+`qcrate_top` maps those outputs directly to `qcrate_core.rst_stream_n_i` and
+`qcrate_core.rst_ctrl_n_i`, respectively. Each reset net therefore asserts
+asynchronously and releases synchronously relative to its destination clock;
+the handwritten Q-Crate registers then sample that conditioned reset using
+their synchronous-reset `always_ff` logic.
+
+Do not add another `xpm_cdc_async_rst` inside `qcrate_core` for these signals.
+That primitive is appropriate when a raw asynchronous reset first enters a
+clock domain; using it after `proc_sys_reset` would duplicate synchronization,
+add reset-release latency, and obscure which layer owns reset generation.
+
 ## Stream-register and IRQ Verilator test
 
 This simulation checks the stream-control APB page and sticky interrupt controller in the 100 MHz control domain. It intentionally does not test command/status CDC; that architecture is decided separately.
@@ -186,7 +202,11 @@ The test covers configuration register reset and readback, `CONTROL` write-one-p
 
 The CDC RTL uses `qcrate_cdc_single` as the local wrapper for single-bit synchronizers. In Vivado builds this wrapper instantiates `xpm_cdc_single`; in Verilator it uses a small two-flop fallback because Verilator does not provide the Xilinx XPM library.
 
-The multi-bit command and status buses are not synchronized bit-by-bit. They use toggle handshakes: the source holds the multi-bit bus stable, the toggle crosses through `qcrate_cdc_single`, and the destination copies the held bus after observing the synchronized toggle.
+Sparse one-bit events use synchronized toggles. Multi-bit command and status
+bundles use `qcrate_cdc_handshake`, the same acknowledged `xpm_cdc_handshake`
+wrapper used by runtime DSP configuration. The wrapper captures one coherent
+source bundle, holds it until destination acceptance, and prevents overwrite
+while the transfer is in flight.
 
 Build and run from the repository root:
 
@@ -198,6 +218,7 @@ CCACHE_DISABLE=1 verilator --binary --timing -Wall \
   --Mdir build/verilator/qcrate_cdc_tb \
   kv260/hw/tb/qcrate_cdc_tb.sv \
   kv260/hw/rtl/qcrate_cdc_single.sv \
+  kv260/hw/rtl/qcrate_cdc_handshake.sv \
   kv260/hw/rtl/qcrate_event_cdc.sv \
   kv260/hw/rtl/qcrate_command_cdc.sv \
   kv260/hw/rtl/qcrate_status_cdc.sv
@@ -211,7 +232,53 @@ Expected result:
 PASS: qcrate_cdc_tb
 ```
 
-The test covers sparse event pulse crossing, command mailbox delivery, command busy rejection, and coherent status snapshot refresh.
+The test covers sparse event pulse crossing, command mailbox delivery, command busy rejection, and coherent status snapshot refresh, including the configuration identity captured with a measurement.
+
+## Runtime DSP configuration test
+
+DP-6B adds a fourth APB page at `0x3000`. Shadow DSP values live in the 100 MHz
+control domain and cross to the 200 MHz stream domain only through an
+acknowledged request/response mailbox. Both wide transfers use the project
+wrapper around Xilinx `xpm_cdc_handshake`, so Vivado recognizes the held-data
+CDC structure while the surrounding transaction and safety policy remain
+readable project-owned RTL.
+
+The destination evaluates safety one stream clock after noticing a request.
+This ensures a simultaneous stream or sequence arm/start command updates its
+state before the commit decision. A safe commit changes all active fields and
+the generation counter on one edge. An unsafe commit is rejected rather than
+deferred, and shadow state remains dirty for inspection or retry.
+
+Run the focused APB and CDC test from the repository root:
+
+```bash
+CCACHE_DISABLE=1 verilator --binary --timing -Wall \
+  --top-module qcrate_dsp_config_tb \
+  --Mdir /tmp/qcrate_dsp_config_tb \
+  kv260/hw/tb/qcrate_dsp_config_tb.sv \
+  kv260/hw/rtl/qcrate_cdc_handshake.sv \
+  kv260/hw/rtl/qcrate_dsp_config_regs.sv \
+  kv260/hw/rtl/qcrate_dsp_config_cdc.sv
+
+/tmp/qcrate_dsp_config_tb/Vqcrate_dsp_config_tb
+```
+
+Expected result:
+
+```text
+PASS: qcrate_dsp_config_tb
+```
+
+The test checks reset identity, dirty tracking, structural width rejection,
+complete-bundle atomicity, generation changes, active readback, unsafe-state
+rejection without active mutation, and `DISCARD` restoration.
+
+The normal implementation flow also writes `build/artifacts/cdc.rpt`. Each XPM
+instance supplies the path-specific CDC constraints required by its protocol;
+Q-Crate deliberately does not apply a broad asynchronous clock-group exception
+that would override the XPM maximum-delay constraints. Review the CDC report
+together with timing, methodology, and DRC reports because functional
+simulation alone cannot prove a physical CDC implementation.
 
 ## Stream-engine Verilator test
 
@@ -486,6 +553,7 @@ CCACHE_DISABLE=1 verilator --binary --timing -Wall -Wno-DECLFILENAME \
   kv260/hw/tb/qcrate_sequence_subsystem_tb.sv \
   kv260/hw/rtl/qcrate_sequence_regs.sv \
   kv260/hw/rtl/qcrate_sequence_ram.sv \
+  kv260/hw/rtl/qcrate_cdc_handshake.sv \
   kv260/hw/rtl/qcrate_sequence_command_cdc.sv \
   kv260/hw/rtl/qcrate_sequence_status_cdc.sv \
   kv260/hw/rtl/qcrate_sequence_event_cdc.sv \

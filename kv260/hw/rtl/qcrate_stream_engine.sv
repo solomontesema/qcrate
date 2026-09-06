@@ -14,6 +14,7 @@ module qcrate_stream_engine #(
     input  wire logic                         soft_reset_i,
     input  wire logic [31:0]                  trigger_shot_id_i,
     input  wire logic [63:0]                  timebase_i,
+    input  wire logic [63:0]                  config_id_i,
 
     input  wire logic [31:0]                  frame_length_i,
     input  wire logic [31:0]                  frame_count_i,
@@ -38,6 +39,7 @@ module qcrate_stream_engine #(
     output logic [31:0]                       missed_trigger_count_o,
     output logic [63:0]                       trigger_time_o,
     output logic [63:0]                       first_sample_time_o,
+    output logic [63:0]                       capture_config_id_o,
 
     output logic [31:0]                       completed_frames_o,
     output logic [31:0]                       current_frame_id_o,
@@ -118,6 +120,7 @@ module qcrate_stream_engine #(
             missed_trigger_count_o <= 32'd0;
             trigger_time_o <= 64'd0;
             first_sample_time_o <= 64'd0;
+            capture_config_id_o <= 64'd0;
             completed_frames_o <= 32'h0000_0000;
             current_frame_id_o <= 32'h0000_0000;
             current_sample_index_o <= 32'h0000_0000;
@@ -201,6 +204,7 @@ module qcrate_stream_engine #(
                         trigger_shot_id_o <= 32'd0;
                         trigger_time_o <= 64'd0;
                         first_sample_time_o <= 64'd0;
+                        capture_config_id_o <= config_id_i;
                         completed_frames_o <= 32'h0000_0000;
                         current_frame_id_o <= 32'h0000_0000;
                         current_sample_index_o <= 32'h0000_0000;
@@ -214,6 +218,7 @@ module qcrate_stream_engine #(
                     trigger_shot_id_o <= trigger_shot_id_i;
                     trigger_count_o <= trigger_count_o + 32'd1;
                     trigger_time_o <= timebase_i;
+                    capture_config_id_o <= config_id_i;
                 end
             end
         end

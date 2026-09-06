@@ -21,7 +21,8 @@ module qcrate_apb_tb;
     localparam logic [31:0] ADDR_STREAM_PAGE      = 32'h0000_1000;
     localparam logic [31:0] ADDR_UNMAPPED_SYS     = 32'h0000_00FC;
     localparam logic [31:0] ADDR_SEQUENCE_PAGE    = 32'h0000_2000;
-    localparam logic [31:0] ADDR_UNMAPPED_PAGE    = 32'h0000_3000;
+    localparam logic [31:0] ADDR_DSP_CONFIG_PAGE  = 32'h0000_3000;
+    localparam logic [31:0] ADDR_UNMAPPED_PAGE    = 32'h0000_4000;
 
     logic        pclk;
     logic        presetn;
@@ -38,6 +39,7 @@ module qcrate_apb_tb;
     logic        sys_psel;
     logic        stream_psel;
     logic        sequence_psel;
+    logic        dsp_config_psel;
 
     logic [31:0] sys_prdata;
     logic        sys_pready;
@@ -50,6 +52,10 @@ module qcrate_apb_tb;
     logic [31:0] sequence_prdata;
     logic        sequence_pready;
     logic        sequence_pslverr;
+
+    logic [31:0] dsp_config_prdata;
+    logic        dsp_config_pready;
+    logic        dsp_config_pslverr;
 
     int unsigned error_count;
 
@@ -66,6 +72,7 @@ module qcrate_apb_tb;
         .sys_psel_o         (sys_psel),
         .stream_psel_o      (stream_psel),
         .sequence_psel_o    (sequence_psel),
+        .dsp_config_psel_o  (dsp_config_psel),
 
         .sys_prdata_i       (sys_prdata),
         .sys_pready_i       (sys_pready),
@@ -78,6 +85,10 @@ module qcrate_apb_tb;
         .sequence_prdata_i  (sequence_prdata),
         .sequence_pready_i  (sequence_pready),
         .sequence_pslverr_i (sequence_pslverr),
+
+        .dsp_config_prdata_i(dsp_config_prdata),
+        .dsp_config_pready_i(dsp_config_pready),
+        .dsp_config_pslverr_i(dsp_config_pslverr),
 
         .prdata_o           (prdata),
         .pready_o           (pready),
@@ -146,6 +157,9 @@ module qcrate_apb_tb;
         sequence_prdata = 32'h5153_4551;
         sequence_pready = 1'b1;
         sequence_pslverr = 1'b0;
+        dsp_config_prdata = 32'hd5c0_cf19;
+        dsp_config_pready = 1'b1;
+        dsp_config_pslverr = 1'b0;
         presetn = 1'b0;
         repeat (3) @(posedge pclk);
         presetn = 1'b1;
@@ -268,6 +282,8 @@ module qcrate_apb_tb;
         expect_bit(sys_psel, 1'b0, "unmapped setup sys select");
         expect_bit(stream_psel, 1'b0, "unmapped setup stream select");
         expect_bit(sequence_psel, 1'b0, "unmapped setup sequence select");
+        expect_bit(dsp_config_psel, 1'b0,
+                   "unmapped setup DSP-config select");
         expect_bit(pslverr, 1'b0, "unmapped setup PSLVERR");
 
         @(negedge pclk);
@@ -291,6 +307,13 @@ module qcrate_apb_tb;
         apb_read(ADDR_SEQUENCE_PAGE, data, err);
         expect_word(data, 32'h5153_4551, "sequence-page routed PRDATA");
         expect_bit(err, 1'b0, "sequence-page routed PSLVERR");
+
+        dsp_config_prdata = 32'hd5c0_cf19;
+        dsp_config_pready = 1'b1;
+        dsp_config_pslverr = 1'b0;
+        apb_read(ADDR_DSP_CONFIG_PAGE, data, err);
+        expect_word(data, 32'hd5c0_cf19, "DSP-config-page routed PRDATA");
+        expect_bit(err, 1'b0, "DSP-config-page routed PSLVERR");
 
         if (error_count != 0) begin
             $fatal(1, "FAIL: qcrate_apb_tb had %0d error(s)", error_count);

@@ -188,6 +188,7 @@ proc open_impl_and_write_reports {} {
     report_utilization -file [file join $cfg_artifact_dir utilization.rpt]
     report_methodology -file [file join $cfg_artifact_dir methodology.rpt]
     report_drc -file [file join $cfg_artifact_dir drc.rpt]
+    report_cdc -details -file [file join $cfg_artifact_dir cdc.rpt]
 }
 proc copy_run_bitstream {} {
     global cfg_project_name cfg_artifact_dir

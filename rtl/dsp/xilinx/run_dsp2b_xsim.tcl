@@ -4,6 +4,7 @@ set script_dir [file dirname [file normalize [info script]]]
 set repo_root [file normalize [file join $script_dir ../../..]]
 set project_dir [file join $repo_root build vivado dsp2b_xsim]
 set vector_dir [file join $repo_root build dsp fir_vectors]
+set alternate_vector_dir [file join $repo_root build dsp fir_vectors_lo28_5]
 set pass_file [file join $vector_dir dsp2b.pass]
 set started_file [file join $vector_dir dsp2b.started]
 set sine_lut_file [file join $repo_root rtl dsp tables sine_quarter_q1_15.mem]
@@ -37,6 +38,9 @@ add_files -norecurse [list \
     [file join $repo_root rtl dsp qcrate_fir_quantizer.sv] \
     [file join $script_dir qcrate_fir_decim16.sv] \
     [file join $repo_root rtl dsp qcrate_dsp_chain.sv] \
+    [file join $repo_root kv260 hw rtl qcrate_cdc_single.sv] \
+    [file join $repo_root kv260 hw rtl qcrate_cdc_handshake.sv] \
+    [file join $repo_root kv260 hw rtl qcrate_dsp_config_cdc.sv] \
     [file join $repo_root kv260 hw rtl qcrate_stream_engine.sv]]
 add_files -fileset sim_1 -norecurse \
     [file join $repo_root rtl tb qcrate_dsp_stream_tb.sv]
@@ -44,7 +48,7 @@ set_property top qcrate_dsp_stream_tb [get_filesets sim_1]
 set_property generic [list "SINE_LUT_FILE=$sine_lut_file"] \
     [get_filesets sim_1]
 set_property -name {xsim.simulate.xsim.more_options} \
-    -value "-testplusarg VECTOR_DIR=$vector_dir" \
+    -value "-testplusarg VECTOR_DIR=$vector_dir -testplusarg VECTOR_DIR_ALT=$alternate_vector_dir" \
     -objects [get_filesets sim_1]
 set_property xsim.elaborate.debug_level typical [get_filesets sim_1]
 set_property xsim.simulate.runtime 0ns [get_filesets sim_1]

@@ -24,7 +24,9 @@ module qcrate_stream_regs_irq_tb;
     localparam logic [11:0] ADDR_TRIGGER_TIME_HIGH    = 12'h040;
     localparam logic [11:0] ADDR_FIRST_SAMPLE_TIME_LOW = 12'h044;
     localparam logic [11:0] ADDR_FIRST_SAMPLE_TIME_HIGH = 12'h048;
-    localparam logic [11:0] ADDR_UNMAPPED             = 12'h04C;
+    localparam logic [11:0] ADDR_CAPTURE_CONFIG_ID_LOW = 12'h04C;
+    localparam logic [11:0] ADDR_CAPTURE_CONFIG_ID_HIGH = 12'h050;
+    localparam logic [11:0] ADDR_UNMAPPED             = 12'h054;
 
     logic        pclk;
     logic        presetn;
@@ -61,6 +63,7 @@ module qcrate_stream_regs_irq_tb;
     logic [31:0] missed_trigger_count;
     logic [63:0] trigger_time;
     logic [63:0] first_sample_time;
+    logic [63:0] capture_config_id;
 
     logic [31:0] irq_events;
     logic [31:0] irq_status;
@@ -108,6 +111,7 @@ module qcrate_stream_regs_irq_tb;
         .missed_trigger_count_i     (missed_trigger_count),
         .trigger_time_i             (trigger_time),
         .first_sample_time_i        (first_sample_time),
+        .capture_config_id_i        (capture_config_id),
 
         .irq_status_i               (irq_status),
         .irq_enable_o               (irq_enable),
@@ -181,6 +185,7 @@ module qcrate_stream_regs_irq_tb;
         missed_trigger_count = 32'h0000_0000;
         trigger_time = 64'h0000_0000_0000_0000;
         first_sample_time = 64'h0000_0000_0000_0000;
+        capture_config_id = 64'h0000_0000_0000_0000;
         irq_events = 32'h0000_0000;
         presetn = 1'b0;
         repeat (3) @(posedge pclk);
@@ -350,6 +355,12 @@ module qcrate_stream_regs_irq_tb;
         first_sample_time[63:32] = 32'hCAFE_BABE;
         expect_read_ok(ADDR_FIRST_SAMPLE_TIME_HIGH, 32'h5566_7788,
                        "FIRST_SAMPLE_TIME coherent high latch");
+        capture_config_id = 64'h5DB4_FB57_8B27_B09F;
+        expect_read_ok(ADDR_CAPTURE_CONFIG_ID_LOW, 32'h8B27_B09F,
+                       "CAPTURE_CONFIG_ID low");
+        capture_config_id[63:32] = 32'hDEAD_BEEF;
+        expect_read_ok(ADDR_CAPTURE_CONFIG_ID_HIGH, 32'h5DB4_FB57,
+                       "CAPTURE_CONFIG_ID coherent high latch");
 
         apb_write(ADDR_IRQ_ENABLE, 32'h0000_0001, err);
         expect_bit(err, 1'b0, "IRQ_ENABLE write PSLVERR");

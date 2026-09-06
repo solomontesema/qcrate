@@ -8,9 +8,13 @@ module qcrate_dsp_stream_tb #(
     localparam int FRAME_LENGTH = 64;
     localparam int FRAME_COUNT = 4;
     localparam int OUTPUT_COUNT = FRAME_LENGTH * FRAME_COUNT;
+    localparam logic [63:0] DEFAULT_CONFIG_ID = 64'h5db4_fb57_8b27_b09f;
+    localparam logic [63:0] ALTERNATE_CONFIG_ID = 64'haf46_287b_b969_ed24;
 
     logic clk;
+    logic ctrl_clk;
     logic rst_n;
+    logic ctrl_rst_n;
     logic start;
     logic arm_triggered;
     logic shot_trigger;
@@ -25,6 +29,30 @@ module qcrate_dsp_stream_tb #(
     logic [31:0] current_frame_id;
     logic [31:0] current_sample_index;
     logic [31:0] stall_cycles;
+    logic [63:0] capture_config_id;
+
+    logic [63:0] shadow_config_id;
+    logic [31:0] shadow_signal_increment;
+    logic [31:0] shadow_signal_initial;
+    logic [15:0] shadow_signal_amplitude;
+    logic [15:0] shadow_noise_amplitude;
+    logic [15:0] shadow_noise_seed;
+    logic [31:0] shadow_lo_increment;
+    logic [31:0] shadow_lo_initial;
+    logic commit_cmd;
+    logic commit_busy;
+    logic commit_accepted;
+    logic commit_rejected;
+    logic [1:0] commit_reject_reason;
+    logic [31:0] active_generation;
+    logic [63:0] active_config_id;
+    logic [31:0] active_signal_increment;
+    logic [31:0] active_signal_initial;
+    logic [15:0] active_signal_amplitude;
+    logic [15:0] active_noise_amplitude;
+    logic [15:0] active_noise_seed;
+    logic [31:0] active_lo_increment;
+    logic [31:0] active_lo_initial;
 
     logic dsp_enable;
     logic dsp_clear;
@@ -40,9 +68,51 @@ module qcrate_dsp_stream_tb #(
     logic axis_last;
 
     logic [31:0] expected_words [0:OUTPUT_COUNT-1];
+    logic [31:0] alternate_expected_words [0:OUTPUT_COUNT-1];
 
     assign dsp_clear = start || arm_triggered || capture_start_pulse ||
                        soft_reset || dsp_clear_test;
+
+    qcrate_dsp_config_cdc u_config_cdc (
+        .ctrl_clk_i                         (ctrl_clk),
+        .ctrl_rst_n_i                       (ctrl_rst_n),
+        .shadow_config_id_i                 (shadow_config_id),
+        .shadow_signal_phase_increment_i    (shadow_signal_increment),
+        .shadow_signal_phase_initial_i      (shadow_signal_initial),
+        .shadow_signal_amplitude_i          (shadow_signal_amplitude),
+        .shadow_noise_amplitude_i           (shadow_noise_amplitude),
+        .shadow_noise_seed_i                (shadow_noise_seed),
+        .shadow_lo_phase_increment_i        (shadow_lo_increment),
+        .shadow_lo_phase_initial_i          (shadow_lo_initial),
+        .commit_cmd_i                       (commit_cmd),
+        .commit_busy_o                      (commit_busy),
+        .commit_accepted_o                  (commit_accepted),
+        .commit_rejected_o                  (commit_rejected),
+        .commit_reject_reason_o             (commit_reject_reason),
+        .active_valid_ctrl_o                (),
+        .active_generation_ctrl_o           (),
+        .active_config_id_ctrl_o            (),
+        .active_signal_phase_increment_ctrl_o(),
+        .active_signal_phase_initial_ctrl_o (),
+        .active_signal_amplitude_ctrl_o     (),
+        .active_noise_amplitude_ctrl_o      (),
+        .active_noise_seed_ctrl_o           (),
+        .active_lo_phase_increment_ctrl_o   (),
+        .active_lo_phase_initial_ctrl_o     (),
+        .stream_clk_i                       (clk),
+        .stream_rst_n_i                     (rst_n),
+        .safe_to_commit_i                   (!busy && !armed && !start &&
+                                             !arm_triggered),
+        .active_generation_stream_o         (active_generation),
+        .active_config_id_stream_o          (active_config_id),
+        .active_signal_phase_increment_stream_o(active_signal_increment),
+        .active_signal_phase_initial_stream_o(active_signal_initial),
+        .active_signal_amplitude_stream_o   (active_signal_amplitude),
+        .active_noise_amplitude_stream_o    (active_noise_amplitude),
+        .active_noise_seed_stream_o         (active_noise_seed),
+        .active_lo_phase_increment_stream_o (active_lo_increment),
+        .active_lo_phase_initial_stream_o   (active_lo_initial)
+    );
 
     qcrate_dsp_chain #(
         .SINE_LUT_FILE              (SINE_LUT_FILE)
@@ -51,6 +121,13 @@ module qcrate_dsp_stream_tb #(
         .rst_n_i                    (rst_n),
         .enable_i                   (dsp_enable),
         .clear_i                    (dsp_clear),
+        .signal_phase_initial_i     (active_signal_initial),
+        .signal_phase_increment_i   (active_signal_increment),
+        .signal_amplitude_i         (active_signal_amplitude),
+        .noise_amplitude_i          (active_noise_amplitude),
+        .noise_seed_i               (active_noise_seed),
+        .lo_phase_initial_i         (active_lo_initial),
+        .lo_phase_increment_i       (active_lo_increment),
         .m_data_o                   (dsp_data),
         .m_valid_o                  (dsp_valid),
         .m_ready_i                  (dsp_ready)
@@ -66,6 +143,7 @@ module qcrate_dsp_stream_tb #(
         .soft_reset_i               (soft_reset),
         .trigger_shot_id_i          (32'd0),
         .timebase_i                 (64'd0),
+        .config_id_i                (active_config_id),
         .frame_length_i             (FRAME_LENGTH),
         .frame_count_i              (FRAME_COUNT),
         .stream_mode_i              (32'd1),
@@ -86,6 +164,7 @@ module qcrate_dsp_stream_tb #(
         .missed_trigger_count_o     (),
         .trigger_time_o             (),
         .first_sample_time_o        (),
+        .capture_config_id_o        (capture_config_id),
         .completed_frames_o         (completed_frames),
         .current_frame_id_o         (current_frame_id),
         .current_sample_index_o     (current_sample_index),
@@ -98,6 +177,7 @@ module qcrate_dsp_stream_tb #(
     );
 
     always #2.5 clk = ~clk;
+    always #5 ctrl_clk = ~ctrl_clk;
 
     initial begin
         int output_count;
@@ -106,6 +186,7 @@ module qcrate_dsp_stream_tb #(
         int pass_file;
         int started_file;
         string vector_dir;
+        string alternate_vector_dir;
         logic [31:0] prng;
         logic transfer;
         logic stalled;
@@ -117,6 +198,9 @@ module qcrate_dsp_stream_tb #(
         if (!$value$plusargs("VECTOR_DIR=%s", vector_dir)) begin
             $fatal(1, "VECTOR_DIR plusarg is required");
         end
+        if (!$value$plusargs("VECTOR_DIR_ALT=%s", alternate_vector_dir)) begin
+            $fatal(1, "VECTOR_DIR_ALT plusarg is required");
+        end
         started_file = $fopen({vector_dir, "/dsp2b.started"}, "w");
         if (started_file == 0) begin
             $fatal(1, "failed to create DSP-2B started sentinel");
@@ -124,14 +208,22 @@ module qcrate_dsp_stream_tb #(
         $fdisplay(started_file, "DSP-2B STARTED");
         $fclose(started_file);
         $readmemh({vector_dir, "/fir_output_words.hex"}, expected_words);
+        $readmemh({alternate_vector_dir, "/fir_output_words.hex"},
+                  alternate_expected_words);
         for (vector_index = 0; vector_index < OUTPUT_COUNT; vector_index++) begin
             if ($isunknown(expected_words[vector_index])) begin
                 $fatal(1, "missing or unknown DSP output vector %0d", vector_index);
             end
+            if ($isunknown(alternate_expected_words[vector_index])) begin
+                $fatal(1, "missing or unknown alternate DSP output vector %0d",
+                       vector_index);
+            end
         end
 
         clk = 1'b0;
+        ctrl_clk = 1'b0;
         rst_n = 1'b0;
+        ctrl_rst_n = 1'b0;
         start = 1'b0;
         arm_triggered = 1'b0;
         shot_trigger = 1'b0;
@@ -139,8 +231,18 @@ module qcrate_dsp_stream_tb #(
         soft_reset = 1'b0;
         dsp_clear_test = 1'b0;
         axis_ready = 1'b0;
+        shadow_config_id = DEFAULT_CONFIG_ID;
+        shadow_signal_increment = 32'h2666_6666;
+        shadow_signal_initial = 32'd0;
+        shadow_signal_amplitude = 16'h6000;
+        shadow_noise_amplitude = 16'h0148;
+        shadow_noise_seed = 16'hace1;
+        shadow_lo_increment = 32'h251e_b852;
+        shadow_lo_initial = 32'd0;
+        commit_cmd = 1'b0;
         repeat (12) @(posedge clk);
         rst_n = 1'b1;
+        ctrl_rst_n = 1'b1;
         repeat (4) @(posedge clk);
 
         @(negedge clk);
@@ -214,6 +316,33 @@ module qcrate_dsp_stream_tb #(
         if (stall_cycles == 0) begin
             $fatal(1, "DSP test applied no observable backpressure");
         end
+        if (capture_config_id != DEFAULT_CONFIG_ID) begin
+            $fatal(1, "reset-profile capture configuration identity mismatch");
+        end
+
+        // Retune while idle. The mailbox must replace the entire active
+        // bundle atomically before the next acquisition can be armed.
+        @(negedge ctrl_clk);
+        shadow_config_id = ALTERNATE_CONFIG_ID;
+        shadow_lo_increment = 32'h247a_e148;
+        commit_cmd = 1'b1;
+        @(negedge ctrl_clk);
+        commit_cmd = 1'b0;
+        guard = 0;
+        while (!commit_accepted && !commit_rejected && (guard < 100)) begin
+            @(posedge ctrl_clk);
+            #1;
+            guard++;
+        end
+        if (!commit_accepted || commit_rejected ||
+            (commit_reject_reason != 2'd0)) begin
+            $fatal(1, "idle configuration commit was not accepted");
+        end
+        if ((active_generation != 32'd1) ||
+            (active_config_id != ALTERNATE_CONFIG_ID) ||
+            (active_lo_increment != 32'h247a_e148)) begin
+            $fatal(1, "active configuration did not change atomically");
+        end
 
         // Repeat the complete golden vector through the triggered path. This
         // proves that arm/trigger clearing does not leak a buffered word or
@@ -246,11 +375,11 @@ module qcrate_dsp_stream_tb #(
             @(posedge clk);
             #1;
             if (transfer) begin
-                if (transferred_data !== expected_words[output_count]) begin
+                if (transferred_data !== alternate_expected_words[output_count]) begin
                     $fatal(1,
                            "Triggered DSP word %0d mismatch: actual=0x%08h expected=0x%08h",
                            output_count, transferred_data,
-                           expected_words[output_count]);
+                           alternate_expected_words[output_count]);
                 end
                 if (transferred_last !==
                     ((output_count % FRAME_LENGTH) == (FRAME_LENGTH - 1))) begin
@@ -264,6 +393,9 @@ module qcrate_dsp_stream_tb #(
         if ((guard >= 200000) || (output_count != OUTPUT_COUNT)) begin
             $fatal(1, "Triggered DSP output count %0d, expected %0d",
                    output_count, OUTPUT_COUNT);
+        end
+        if (capture_config_id != ALTERNATE_CONFIG_ID) begin
+            $fatal(1, "triggered capture configuration identity mismatch");
         end
 
         // Start another acquisition with its output stalled, then verify that
@@ -281,6 +413,29 @@ module qcrate_dsp_stream_tb #(
         if (!dsp_valid) begin
             $fatal(1, "DSP did not buffer an output for clear/valid test");
         end
+
+        shadow_config_id = DEFAULT_CONFIG_ID;
+        shadow_lo_increment = 32'h251e_b852;
+        @(negedge ctrl_clk);
+        commit_cmd = 1'b1;
+        @(negedge ctrl_clk);
+        commit_cmd = 1'b0;
+        guard = 0;
+        while (!commit_accepted && !commit_rejected && (guard < 100)) begin
+            @(posedge ctrl_clk);
+            #1;
+            guard++;
+        end
+        if (!commit_rejected || commit_accepted ||
+            (commit_reject_reason != 2'd2)) begin
+            $fatal(1, "mid-capture configuration commit was not rejected");
+        end
+        if ((active_generation != 32'd1) ||
+            (active_config_id != ALTERNATE_CONFIG_ID) ||
+            (active_lo_increment != 32'h247a_e148)) begin
+            $fatal(1, "rejected mid-capture commit changed active state");
+        end
+
         dsp_clear_test = 1'b1;
         #1;
         if (dsp_valid) begin
@@ -296,7 +451,7 @@ module qcrate_dsp_stream_tb #(
         $fdisplay(pass_file, "DSP-2B PASS");
         $fclose(pass_file);
         $display(
-            "PASS: qcrate_dsp_stream_tb verified %0d exact words in %0d frames",
+            "PASS: qcrate_dsp_stream_tb verified 2 profiles, %0d exact words in %0d frames each",
             OUTPUT_COUNT, FRAME_COUNT
         );
         $finish;

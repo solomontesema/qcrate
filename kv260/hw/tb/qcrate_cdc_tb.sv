@@ -50,6 +50,7 @@ module qcrate_cdc_tb;
     logic [31:0] live_missed_trigger_count;
     logic [63:0] live_trigger_time;
     logic [63:0] live_first_sample_time;
+    logic [63:0] live_capture_config_id;
     logic        snap_busy;
     logic        snap_armed;
     logic        snap_trigger_seen;
@@ -63,6 +64,7 @@ module qcrate_cdc_tb;
     logic [31:0] snap_missed_trigger_count;
     logic [63:0] snap_trigger_time;
     logic [63:0] snap_first_sample_time;
+    logic [63:0] snap_capture_config_id;
 
     int unsigned error_count;
 
@@ -124,6 +126,7 @@ module qcrate_cdc_tb;
         .missed_trigger_count_i     (live_missed_trigger_count),
         .trigger_time_i             (live_trigger_time),
         .first_sample_time_i        (live_first_sample_time),
+        .capture_config_id_i        (live_capture_config_id),
 
         .ctrl_clk_i                 (ctrl_clk),
         .ctrl_rst_n_i               (ctrl_rst_n),
@@ -140,7 +143,8 @@ module qcrate_cdc_tb;
         .trigger_count_o            (snap_trigger_count),
         .missed_trigger_count_o     (snap_missed_trigger_count),
         .trigger_time_o             (snap_trigger_time),
-        .first_sample_time_o        (snap_first_sample_time)
+        .first_sample_time_o        (snap_first_sample_time),
+        .capture_config_id_o        (snap_capture_config_id)
     );
 
     initial begin
@@ -240,6 +244,7 @@ module qcrate_cdc_tb;
         live_missed_trigger_count = 32'h0000_0000;
         live_trigger_time = 64'h0000_0000_0000_0000;
         live_first_sample_time = 64'h0000_0000_0000_0000;
+        live_capture_config_id = 64'h0000_0000_0000_0000;
         repeat (5) @(posedge ctrl_clk);
         repeat (5) @(posedge stream_clk);
         stream_rst_n = 1'b1;
@@ -443,6 +448,7 @@ module qcrate_cdc_tb;
         live_missed_trigger_count = 32'h0000_0070;
         live_trigger_time = 64'h1122_3344_5566_7788;
         live_first_sample_time = 64'h99AA_BBCC_DDEE_FF00;
+        live_capture_config_id = 64'h5DB4_FB57_8B27_B09F;
         wait_snapshot(1'b1, 32'h0000_0010, 32'h0000_0020,
                       32'h0000_0030, 32'h0000_0040,
                       "first status snapshot");
@@ -460,6 +466,8 @@ module qcrate_cdc_tb;
             fail("first snapshot trigger time mismatch");
         if (snap_first_sample_time !== 64'h99AA_BBCC_DDEE_FF00)
             fail("first snapshot sample time mismatch");
+        if (snap_capture_config_id !== 64'h5DB4_FB57_8B27_B09F)
+            fail("first snapshot configuration ID mismatch");
 
         @(negedge stream_clk);
         live_busy = 1'b0;
@@ -475,6 +483,7 @@ module qcrate_cdc_tb;
         live_missed_trigger_count = 32'h0000_0700;
         live_trigger_time = 64'h0123_4567_89AB_CDEF;
         live_first_sample_time = 64'hFEDC_BA98_7654_3210;
+        live_capture_config_id = 64'hAF46_287B_B969_ED24;
         wait_snapshot(1'b0, 32'h0000_0100, 32'h0000_0200,
                       32'h0000_0300, 32'h0000_0400,
                       "second status snapshot");
@@ -486,6 +495,8 @@ module qcrate_cdc_tb;
                     "second snapshot shot id");
         if (snap_trigger_time !== 64'h0123_4567_89AB_CDEF)
             fail("second snapshot trigger time mismatch");
+        if (snap_capture_config_id !== 64'hAF46_287B_B969_ED24)
+            fail("second snapshot configuration ID mismatch");
 
         if (error_count != 0) begin
             $fatal(1, "FAIL: qcrate_cdc_tb had %0d error(s)", error_count);

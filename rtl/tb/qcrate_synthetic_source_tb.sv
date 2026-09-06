@@ -19,6 +19,11 @@ module qcrate_synthetic_source_tb;
         .rst_n_i                    (rst_n),
         .enable_i                   (enable),
         .phase_load_i               (phase_load),
+        .signal_phase_initial_i     (32'h0000_0000),
+        .signal_phase_increment_i   (32'h2666_6666),
+        .signal_amplitude_i         (16'sd24576),
+        .noise_amplitude_i          (16'sd328),
+        .noise_seed_i               (16'hace1),
         .m_sample_data_o            (sample_data),
         .m_sample_valid_o           (sample_valid),
         .m_sample_ready_i           (sample_ready)

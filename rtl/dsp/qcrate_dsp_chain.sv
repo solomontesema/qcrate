@@ -2,19 +2,19 @@
 `default_nettype none
 
 module qcrate_dsp_chain #(
-    parameter string SINE_LUT_FILE = "rtl/dsp/tables/sine_quarter_q1_15.mem",
-    parameter logic [31:0] SIGNAL_PHASE_INITIAL = 32'h0000_0000,
-    parameter logic [31:0] SIGNAL_PHASE_INCREMENT = 32'h2666_6666,
-    parameter logic signed [15:0] SIGNAL_AMPLITUDE_Q1_15 = 16'sd24576,
-    parameter logic signed [15:0] NOISE_AMPLITUDE_Q1_15 = 16'sd328,
-    parameter logic [15:0] NOISE_SEED = 16'hace1,
-    parameter logic [31:0] LO_PHASE_INITIAL = 32'h0000_0000,
-    parameter logic [31:0] LO_PHASE_INCREMENT = 32'h251e_b852
+    parameter string SINE_LUT_FILE = "rtl/dsp/tables/sine_quarter_q1_15.mem"
 ) (
     input  wire logic                      clk_i,
     input  wire logic                      rst_n_i,
     input  wire logic                      enable_i,
     input  wire logic                      clear_i,
+    input  wire logic [31:0]               signal_phase_initial_i,
+    input  wire logic [31:0]               signal_phase_increment_i,
+    input  wire logic signed [15:0]        signal_amplitude_i,
+    input  wire logic signed [15:0]        noise_amplitude_i,
+    input  wire logic [15:0]               noise_seed_i,
+    input  wire logic [31:0]               lo_phase_initial_i,
+    input  wire logic [31:0]               lo_phase_increment_i,
 
     output logic [31:0]                    m_data_o,
     output logic                           m_valid_o,
@@ -36,17 +36,17 @@ module qcrate_dsp_chain #(
     logic filtered_valid;
 
     qcrate_synthetic_source #(
-        .SINE_LUT_FILE              (SINE_LUT_FILE),
-        .SIGNAL_PHASE_INITIAL       (SIGNAL_PHASE_INITIAL),
-        .SIGNAL_PHASE_INCREMENT     (SIGNAL_PHASE_INCREMENT),
-        .SIGNAL_AMPLITUDE_Q1_15     (SIGNAL_AMPLITUDE_Q1_15),
-        .NOISE_AMPLITUDE_Q1_15      (NOISE_AMPLITUDE_Q1_15),
-        .NOISE_SEED                 (NOISE_SEED)
+        .SINE_LUT_FILE              (SINE_LUT_FILE)
     ) u_source (
         .clk_i                      (clk_i),
         .rst_n_i                    (rst_n_i),
         .enable_i                   (enable_i),
         .phase_load_i               (clear_i),
+        .signal_phase_initial_i     (signal_phase_initial_i),
+        .signal_phase_increment_i   (signal_phase_increment_i),
+        .signal_amplitude_i         (signal_amplitude_i),
+        .noise_amplitude_i          (noise_amplitude_i),
+        .noise_seed_i               (noise_seed_i),
         .m_sample_data_o            (source_sample),
         .m_sample_valid_o           (source_valid),
         .m_sample_ready_i           (source_ready)
@@ -58,8 +58,8 @@ module qcrate_dsp_chain #(
         .clk_i                      (clk_i),
         .rst_n_i                    (rst_n_i),
         .phase_load_i               (clear_i),
-        .lo_phase_initial_i         (LO_PHASE_INITIAL),
-        .lo_phase_increment_i       (LO_PHASE_INCREMENT),
+        .lo_phase_initial_i         (lo_phase_initial_i),
+        .lo_phase_increment_i       (lo_phase_increment_i),
         .s_sample_data_i            (source_sample),
         .s_sample_valid_i           (source_valid),
         .s_sample_ready_o           (source_ready),

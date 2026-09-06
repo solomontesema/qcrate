@@ -30,65 +30,61 @@ module qcrate_command_cdc (
     output logic             soft_reset_pulse_o
 );
 
-    logic [31:0] mailbox_frame_length_ctrl;
-    logic [31:0] mailbox_frame_count_ctrl;
-    logic [31:0] mailbox_stream_mode_ctrl;
-    logic        mailbox_continuous_ctrl;
-    logic        mailbox_start_ctrl;
-    logic        mailbox_arm_triggered_ctrl;
-    logic        mailbox_abort_ctrl;
-    logic        mailbox_soft_reset_ctrl;
+    localparam int COMMAND_WIDTH = 101;
 
-    logic        req_toggle_ctrl;
-    logic        ack_toggle_stream;
-    logic        req_toggle_stream_sync;
-    logic        ack_toggle_ctrl_sync;
-    logic        req_toggle_stream_seen;
-    logic        command_fire_ctrl;
+    logic [COMMAND_WIDTH-1:0] command_data_ctrl;
+    logic [COMMAND_WIDTH-1:0] command_data_stream;
+    logic command_send_ctrl;
+    logic command_valid_stream;
 
-    assign command_busy_o = req_toggle_ctrl ^ ack_toggle_ctrl_sync;
-    assign command_fire_ctrl = (start_cmd_i || arm_triggered_cmd_i ||
-                                abort_cmd_i || soft_reset_cmd_i) &&
-                               !command_busy_o;
+    logic [31:0] command_frame_length_stream;
+    logic [31:0] command_frame_count_stream;
+    logic [31:0] command_stream_mode_stream;
+    logic command_continuous_stream;
+    logic command_start_stream;
+    logic command_arm_triggered_stream;
+    logic command_abort_stream;
+    logic command_soft_reset_stream;
 
-    always_ff @(posedge ctrl_clk_i) begin
-        if (!ctrl_rst_n_i) begin
-            mailbox_frame_length_ctrl <= 32'h0000_0000;
-            mailbox_frame_count_ctrl <= 32'h0000_0000;
-            mailbox_stream_mode_ctrl <= 32'h0000_0000;
-            mailbox_continuous_ctrl <= 1'b0;
-            mailbox_start_ctrl <= 1'b0;
-            mailbox_arm_triggered_ctrl <= 1'b0;
-            mailbox_abort_ctrl <= 1'b0;
-            mailbox_soft_reset_ctrl <= 1'b0;
-            req_toggle_ctrl <= 1'b0;
-        end else if (command_fire_ctrl) begin
-            mailbox_frame_length_ctrl <= frame_length_i;
-            mailbox_frame_count_ctrl <= frame_count_i;
-            mailbox_stream_mode_ctrl <= stream_mode_i;
-            mailbox_continuous_ctrl <= continuous_i;
-            mailbox_start_ctrl <= start_cmd_i;
-            mailbox_arm_triggered_ctrl <= arm_triggered_cmd_i;
-            mailbox_abort_ctrl <= abort_cmd_i;
-            mailbox_soft_reset_ctrl <= soft_reset_cmd_i;
-            req_toggle_ctrl <= ~req_toggle_ctrl;
-        end
-    end
+    assign command_send_ctrl =
+        (start_cmd_i || arm_triggered_cmd_i || abort_cmd_i ||
+         soft_reset_cmd_i) && !command_busy_o;
 
-    qcrate_cdc_single u_req_sync (
+    assign command_data_ctrl = {
+        frame_length_i,
+        frame_count_i,
+        stream_mode_i,
+        continuous_i,
+        start_cmd_i,
+        arm_triggered_cmd_i,
+        abort_cmd_i,
+        soft_reset_cmd_i
+    };
+
+    assign {
+        command_frame_length_stream,
+        command_frame_count_stream,
+        command_stream_mode_stream,
+        command_continuous_stream,
+        command_start_stream,
+        command_arm_triggered_stream,
+        command_abort_stream,
+        command_soft_reset_stream
+    } = command_data_stream;
+
+    qcrate_cdc_handshake #(
+        .WIDTH (COMMAND_WIDTH)
+    ) u_command_handshake (
         .src_clk_i      (ctrl_clk_i),
-        .src_signal_i   (req_toggle_ctrl),
-        .dst_clk_i      (stream_clk_i),
-        .dst_rst_n_i    (stream_rst_n_i),
-        .dst_signal_o   (req_toggle_stream_sync)
-    );
-
-    qcrate_cdc_single u_ack_sync (
-        .src_clk_i      (stream_clk_i),
-        .src_signal_i   (ack_toggle_stream),
-        .dst_clk_i      (ctrl_clk_i),
-        .dst_rst_n_i    (ctrl_rst_n_i),
-        .dst_signal_o   (ack_toggle_ctrl_sync)
+        .src_rst_n_i    (ctrl_rst_n_i),
+        .src_data_i     (command_data_ctrl),
+        .src_send_i     (command_send_ctrl),
+        .src_busy_o     (command_busy_o),
+        .dest_clk_i     (stream_clk_i),
+        .dest_rst_n_i   (stream_rst_n_i),
+        .dest_data_o    (command_data_stream),
+        .dest_valid_o   (command_valid_stream),
+        .dest_accept_i  (1'b1)
     );
 
     always_ff @(posedge stream_clk_i) begin
@@ -101,25 +97,21 @@ module qcrate_command_cdc (
             arm_triggered_pulse_o <= 1'b0;
             abort_pulse_o <= 1'b0;
             soft_reset_pulse_o <= 1'b0;
-            req_toggle_stream_seen <= 1'b0;
-            ack_toggle_stream <= 1'b0;
         end else begin
             start_pulse_o <= 1'b0;
             arm_triggered_pulse_o <= 1'b0;
             abort_pulse_o <= 1'b0;
             soft_reset_pulse_o <= 1'b0;
 
-            if (req_toggle_stream_sync != req_toggle_stream_seen) begin
-                active_frame_length_o <= mailbox_frame_length_ctrl;
-                active_frame_count_o <= mailbox_frame_count_ctrl;
-                active_stream_mode_o <= mailbox_stream_mode_ctrl;
-                active_continuous_o <= mailbox_continuous_ctrl;
-                start_pulse_o <= mailbox_start_ctrl;
-                arm_triggered_pulse_o <= mailbox_arm_triggered_ctrl;
-                abort_pulse_o <= mailbox_abort_ctrl;
-                soft_reset_pulse_o <= mailbox_soft_reset_ctrl;
-                req_toggle_stream_seen <= req_toggle_stream_sync;
-                ack_toggle_stream <= req_toggle_stream_sync;
+            if (command_valid_stream) begin
+                active_frame_length_o <= command_frame_length_stream;
+                active_frame_count_o <= command_frame_count_stream;
+                active_stream_mode_o <= command_stream_mode_stream;
+                active_continuous_o <= command_continuous_stream;
+                start_pulse_o <= command_start_stream;
+                arm_triggered_pulse_o <= command_arm_triggered_stream;
+                abort_pulse_o <= command_abort_stream;
+                soft_reset_pulse_o <= command_soft_reset_stream;
             end
         end
     end

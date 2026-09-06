@@ -237,11 +237,12 @@ that implements the same ADC stimulus as the DSP-0 model:
         TDATA[15:0]  = signed Q1.15 I
 ```
 
-The frozen experiment uses signal increment `0x26666666`, LO increment
+The reset experiment uses signal increment `0x26666666`, LO increment
 `0x251eb852`, signal amplitude `24576` (0.75 in Q1.15), noise amplitude `328`,
-and LFSR seed `0xace1`. These values are parameters at the RTL boundary but are
-not yet runtime APB registers. A later control milestone can add atomic DDC
-configuration without changing the mode/framing interface.
+and LFSR seed `0xace1`. DP-6B drives these ports from an atomic active
+configuration bundle. Software writes a separate shadow bundle; no NCO,
+source, or capture-identity field can change until the complete bundle is
+accepted at an idle experiment boundary.
 
 The synthetic source arithmetic is a three-stage pipeline at 200 MHz:
 
@@ -329,7 +330,7 @@ backpressure. Success ends with:
 ```text
 PASS: qcrate_fir_decim16_tb verified 256 exact outputs
 PASS: DSP-2A generated-IP XSim flow
-PASS: qcrate_dsp_stream_tb verified 256 exact words in 4 frames
+PASS: qcrate_dsp_stream_tb verified 2 profiles, 256 exact words in 4 frames each
 PASS: DSP-2B complete-chain XSim flow
 ```
 
@@ -341,7 +342,10 @@ python3 rtl/dsp/xilinx/run_test.py --test chain
 
 It checks the synthetic source, both NCOs, mixer, FIR, packed IQ layout, four
 `TLAST` boundaries, completion status, and stable output under randomized AXI
-backpressure.
+backpressure. It then commits the resolved 28.5 MHz LO profile through the
+asynchronous configuration mailbox and verifies a second acquisition against
+a separately generated exact vector set. The captured configuration identity
+must change from the reset profile to `0xaf46287bb969ed24` with the waveform.
 
 The same test can retain its completed waveform in the Vivado GUI:
 

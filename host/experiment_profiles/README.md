@@ -7,8 +7,9 @@ integers hardware will consume, and deterministic identities bind those values
 to the numerical, acquisition, and timing contracts.
 
 This directory contains the human profile schema, compiler, examples, and
-focused tests. It does not yet write the board. DP-6B will implement atomic PL
-activation, DP-6C will give the R5 semantic ownership, and DP-6D will expose the
+focused tests. DP-6B implements the corresponding PL shadow registers and
+atomic activation mailbox. It deliberately does not yet expose direct host
+configuration: DP-6C gives R5 semantic ownership, and DP-6D exposes that owned
 workflow through the existing control tools.
 
 ## Experiment definition
@@ -133,3 +134,29 @@ The tracked [proof summary](examples/dp6a-proof.json) records the model result:
 Both FFT peaks are within one 3075.787 Hz bin of the frequency predicted from
 the exact tuning words. The corresponding [resolved profiles](examples/resolved/)
 are tracked as readable golden contract artifacts.
+
+## DP-6B hardware boundary
+
+The implemented `0x3000` APB page stores a complete shadow bundle in the
+100 MHz control domain. `COMMIT` snapshots that bundle into an acknowledged
+`xpm_cdc_handshake` request. The 200 MHz destination waits an additional clock
+before checking the experiment boundary, then either activates every field and
+increments `ACTIVE_GENERATION` in one edge or rejects the request without
+changing any active field. A second acknowledged handshake returns the result
+and coherent active readback to the control domain.
+
+Safe activation requires both the stream engine and sequence engine to be idle
+and unarmed, with no visible command pulse. This closes the race between a
+configuration commit and a simultaneous arm/start command. Rejection is
+explicit and never queues a hidden deferred update.
+
+The stream engine snapshots the active 64-bit DSP configuration ID when a
+capture starts. The captured identity is returned at stream offsets `0x04c`
+and `0x050`, independently of later shadow edits. DP-6C will use this hardware
+boundary through R5 rather than granting Linux applications unrestricted
+semantic ownership.
+
+For both the active and captured 64-bit identities, software reads the low
+word first; that access latches the corresponding high word for the following
+read. A coherent active-bundle inspection also reads `ACTIVE_GENERATION`
+before and after the fields and retries if the generation changed.

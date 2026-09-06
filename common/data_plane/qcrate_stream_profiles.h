@@ -7,11 +7,8 @@
 #define QCRATE_DSP_TIMEBASE_RATE_HZ    UINT64_C(200000000)
 #define QCRATE_DSP_CENTER_FREQUENCY_HZ INT64_C(29000000)
 
-/*
- * First 64 bits of SHA-256(config JSON || DSP table manifest):
- * 0fd399e017ecb182eb07ef62763b6e3bb8c09a74b1d0fd34902eee0eca2a1d7e
- */
-#define QCRATE_DSP_CONFIG_ID UINT64_C(0x0fd399e017ecb182)
+/* DP-6 canonical identity of the resolved 29 MHz reset profile. */
+#define QCRATE_DSP_CONFIG_ID UINT64_C(0x5db4fb578b27b09f)
 
 #define QCRATE_COUNTER_SAMPLE_RATE_HZ   UINT64_C(200000000)
 #define QCRATE_COUNTER_TIMEBASE_RATE_HZ UINT64_C(200000000)

@@ -66,7 +66,7 @@ int main(void)
 		.component_bits = 16,
 		.fraction_bits = 15,
 		.timestamp_clock_id = QCRATE_DATA_CLOCK_QCRATE_TIMEBASE,
-		.config_id = UINT64_C(0x0fd399e017ecb182),
+		.config_id = UINT64_C(0x5db4fb578b27b09f),
 		.first_sample_timestamp = UINT64_C(0x123456789abcdef0),
 		.first_sample_timestamp_valid = true,
 		.end_of_stream = true,

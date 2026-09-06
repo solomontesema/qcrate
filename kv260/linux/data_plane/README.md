@@ -128,22 +128,16 @@ The packet metadata is centralized in
   DATA packet and sets `TIMESTAMP_VALID` only there. Later packet timestamps
   remain invalid rather than manufacturing sub-shot precision.
 
-The DSP `config_id` is the first 64 bits of SHA-256 over the canonical DSP JSON
-followed by the table manifest. A focused test fails if either source changes
-without updating the deployed identity. Reproduce the full digest with:
+The DSP `config_id` is the first 64 bits of the canonical resolved DSP-profile
+SHA-256 introduced by DP-6. A focused test binds the deployed default to the
+tracked 29 MHz resolved profile. Inspect that identity with:
 
 ```bash
-python3 - <<'PY'
-import hashlib
-from pathlib import Path
-
-config = Path("host/dsp_model/configs/tone_1mhz.json").read_bytes()
-tables = Path("rtl/dsp/tables/manifest.json").read_bytes()
-print(hashlib.sha256(config + tables).hexdigest())
-PY
+python3 host/experiment_profiles/qcrate_profile.py show \
+  host/experiment_profiles/examples/lo_29mhz.json
 ```
 
-Expected prefix: `0fd399e017ecb182`.
+Expected DSP configuration ID: `0x5db4fb578b27b09f`.
 
 ## Source Map
 

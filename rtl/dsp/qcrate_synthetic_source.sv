@@ -2,17 +2,17 @@
 `default_nettype none
 
 module qcrate_synthetic_source #(
-    parameter string SINE_LUT_FILE = "rtl/dsp/tables/sine_quarter_q1_15.mem",
-    parameter logic [31:0] SIGNAL_PHASE_INITIAL = 32'h0000_0000,
-    parameter logic [31:0] SIGNAL_PHASE_INCREMENT = 32'h2666_6666,
-    parameter logic signed [15:0] SIGNAL_AMPLITUDE_Q1_15 = 16'sd24576,
-    parameter logic signed [15:0] NOISE_AMPLITUDE_Q1_15 = 16'sd328,
-    parameter logic [15:0] NOISE_SEED = 16'hace1
+    parameter string SINE_LUT_FILE = "rtl/dsp/tables/sine_quarter_q1_15.mem"
 ) (
     input  wire logic                      clk_i,
     input  wire logic                      rst_n_i,
     input  wire logic                      enable_i,
     input  wire logic                      phase_load_i,
+    input  wire logic [31:0]               signal_phase_initial_i,
+    input  wire logic [31:0]               signal_phase_increment_i,
+    input  wire logic signed [15:0]        signal_amplitude_i,
+    input  wire logic signed [15:0]        noise_amplitude_i,
+    input  wire logic [15:0]               noise_seed_i,
 
     output logic signed [15:0]             m_sample_data_o,
     output logic                           m_sample_valid_o,
@@ -99,8 +99,8 @@ module qcrate_synthetic_source #(
         .rst_n_i                     (rst_n_i),
         .ce_i                        (pipeline_ce),
         .phase_load_i                (phase_load_i),
-        .phase_initial_i             (SIGNAL_PHASE_INITIAL),
-        .phase_increment_i           (SIGNAL_PHASE_INCREMENT),
+        .phase_initial_i             (signal_phase_initial_i),
+        .phase_increment_i           (signal_phase_increment_i),
         .advance_i                   (sample_advance),
         .valid_o                     (nco_valid),
         .sine_o                      (signal_sine_unused),
@@ -112,7 +112,7 @@ module qcrate_synthetic_source #(
         logic [15:0] next_lfsr;
 
         if (!rst_n_i || phase_load_i) begin
-            lfsr_state <= NOISE_SEED;
+            lfsr_state <= noise_seed_i;
             noise_delay_0 <= '0;
             noise_delay_1 <= '0;
             product_valid <= 1'b0;
@@ -137,8 +137,8 @@ module qcrate_synthetic_source #(
             end
 
             if (nco_valid) begin
-                signal_product <= signal_cosine * SIGNAL_AMPLITUDE_Q1_15;
-                noise_product <= noise_delay_1 * NOISE_AMPLITUDE_Q1_15;
+                signal_product <= signal_cosine * signal_amplitude_i;
+                noise_product <= noise_delay_1 * noise_amplitude_i;
             end
 
             if (product_valid) begin
@@ -150,12 +150,6 @@ module qcrate_synthetic_source #(
                 m_sample_data_o <= saturating_add(signal_component,
                                                   noise_component);
             end
-        end
-    end
-
-    initial begin
-        if (NOISE_SEED == 16'h0000) begin
-            $fatal(1, "NOISE_SEED must be nonzero");
         end
     end
 

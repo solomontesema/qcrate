@@ -48,6 +48,16 @@ def main() -> int:
         "--outputs",
         "256",
     ])
+    if args.test in ("chain", "all"):
+        run([
+            sys.executable,
+            "host/dsp_model/qcrate_dsp.py",
+            "generate-fir-vectors",
+            "host/experiment_profiles/examples/resolved/lo_28_5mhz.resolved.json",
+            "build/dsp/fir_vectors_lo28_5",
+            "--outputs",
+            "256",
+        ])
     tests = {
         "fir": {
             "script": ROOT / "rtl/dsp/xilinx/run_fir_xsim.tcl",
@@ -108,6 +118,8 @@ def main() -> int:
                     "--R",
                     "--testplusarg",
                     f"VECTOR_DIR={ROOT / 'build/dsp/fir_vectors'}",
+                    "--testplusarg",
+                    f"VECTOR_DIR_ALT={ROOT / 'build/dsp/fir_vectors_lo28_5'}",
                 ],
                 cwd=test["kernel"].parents[2],
                 check=True,

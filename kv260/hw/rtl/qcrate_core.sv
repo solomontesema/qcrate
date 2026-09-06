@@ -11,10 +11,10 @@ module qcrate_core #(
     // ============================================================
 
     input  logic                         clk_ctrl_i,       // 100 MHz
-    input  logic                         rst_ctrl_n_i,
+    input  logic                         rst_ctrl_n_i,     // Conditioned for clk_ctrl_i by the BD
 
     input  logic                         clk_stream_i,     // 200 MHz
-    input  logic                         rst_stream_n_i,
+    input  logic                         rst_stream_n_i,   // Conditioned for clk_stream_i by the BD
 
     // ============================================================
     // APB slave interface
@@ -62,6 +62,7 @@ module qcrate_core #(
     logic sys_psel;
     logic stream_psel;
     logic sequence_psel;
+    logic dsp_config_psel;
 
     logic [31:0] sys_prdata;
     logic        sys_pready;
@@ -74,6 +75,10 @@ module qcrate_core #(
     logic [31:0] sequence_prdata;
     logic        sequence_pready;
     logic        sequence_pslverr;
+
+    logic [31:0] dsp_config_prdata;
+    logic        dsp_config_pready;
+    logic        dsp_config_pslverr;
 
     localparam int SEQUENCE_MAX_EVENTS = 128;
     localparam int SEQUENCE_ADDR_WIDTH = $clog2(SEQUENCE_MAX_EVENTS);
@@ -94,6 +99,30 @@ module qcrate_core #(
     logic        soft_reset_cmd_ctrl;
     logic        command_busy_ctrl;
 
+    logic [63:0] dsp_shadow_config_id_ctrl;
+    logic [31:0] dsp_shadow_signal_increment_ctrl;
+    logic [31:0] dsp_shadow_signal_initial_ctrl;
+    logic [15:0] dsp_shadow_signal_amplitude_ctrl;
+    logic [15:0] dsp_shadow_noise_amplitude_ctrl;
+    logic [15:0] dsp_shadow_noise_seed_ctrl;
+    logic [31:0] dsp_shadow_lo_increment_ctrl;
+    logic [31:0] dsp_shadow_lo_initial_ctrl;
+    logic        dsp_commit_cmd_ctrl;
+    logic        dsp_commit_busy_ctrl;
+    logic        dsp_commit_accepted_ctrl;
+    logic        dsp_commit_rejected_ctrl;
+    logic [1:0]  dsp_commit_reject_reason_ctrl;
+    logic        dsp_active_valid_ctrl;
+    logic [31:0] dsp_active_generation_ctrl;
+    logic [63:0] dsp_active_config_id_ctrl;
+    logic [31:0] dsp_active_signal_increment_ctrl;
+    logic [31:0] dsp_active_signal_initial_ctrl;
+    logic [15:0] dsp_active_signal_amplitude_ctrl;
+    logic [15:0] dsp_active_noise_amplitude_ctrl;
+    logic [15:0] dsp_active_noise_seed_ctrl;
+    logic [31:0] dsp_active_lo_increment_ctrl;
+    logic [31:0] dsp_active_lo_initial_ctrl;
+
     // ============================================================
     // Active configuration in 200 MHz stream domain
     // ============================================================
@@ -107,6 +136,17 @@ module qcrate_core #(
     logic        arm_triggered_pulse_stream;
     logic        abort_pulse_stream;
     logic        soft_reset_pulse_stream;
+
+    logic        dsp_config_safe_stream;
+    logic [31:0] dsp_active_generation_stream;
+    logic [63:0] dsp_active_config_id_stream;
+    logic [31:0] dsp_active_signal_increment_stream;
+    logic [31:0] dsp_active_signal_initial_stream;
+    logic [15:0] dsp_active_signal_amplitude_stream;
+    logic [15:0] dsp_active_noise_amplitude_stream;
+    logic [15:0] dsp_active_noise_seed_stream;
+    logic [31:0] dsp_active_lo_increment_stream;
+    logic [31:0] dsp_active_lo_initial_stream;
 
     // ============================================================
     // Stream-domain status
@@ -125,6 +165,7 @@ module qcrate_core #(
     logic [31:0] stream_missed_trigger_count;
     logic [63:0] stream_trigger_time;
     logic [63:0] stream_first_sample_time;
+    logic [63:0] stream_capture_config_id;
 
     logic [31:0] completed_frames_stream;
     logic [31:0] current_frame_id_stream;
@@ -154,6 +195,7 @@ module qcrate_core #(
     logic [31:0] stream_missed_trigger_count_ctrl;
     logic [63:0] stream_trigger_time_ctrl;
     logic [63:0] stream_first_sample_time_ctrl;
+    logic [63:0] stream_capture_config_id_ctrl;
 
     // ============================================================
     // Interrupt signals
@@ -249,6 +291,7 @@ module qcrate_core #(
         .sys_psel_o         (sys_psel),
         .stream_psel_o      (stream_psel),
         .sequence_psel_o    (sequence_psel),
+        .dsp_config_psel_o  (dsp_config_psel),
 
         .sys_prdata_i       (sys_prdata),
         .sys_pready_i       (sys_pready),
@@ -262,9 +305,107 @@ module qcrate_core #(
         .sequence_pready_i  (sequence_pready),
         .sequence_pslverr_i (sequence_pslverr),
 
+        .dsp_config_prdata_i(dsp_config_prdata),
+        .dsp_config_pready_i(dsp_config_pready),
+        .dsp_config_pslverr_i(dsp_config_pslverr),
+
         .prdata_o           (s_apb_prdata_o),
         .pready_o           (s_apb_pready_o),
         .pslverr_o          (s_apb_pslverr_o)
+    );
+
+    // ============================================================
+    // Runtime DSP shadow configuration and atomic activation
+    // ============================================================
+
+    qcrate_dsp_config_regs u_dsp_config_regs (
+        .pclk_i                         (clk_ctrl_i),
+        .presetn_i                      (rst_ctrl_n_i),
+        .paddr_i                        (s_apb_paddr_i[11:0]),
+        .psel_i                         (dsp_config_psel),
+        .penable_i                      (s_apb_penable_i),
+        .pwrite_i                       (s_apb_pwrite_i),
+        .pwdata_i                       (s_apb_pwdata_i),
+        .prdata_o                       (dsp_config_prdata),
+        .pready_o                       (dsp_config_pready),
+        .pslverr_o                      (dsp_config_pslverr),
+        .shadow_config_id_o             (dsp_shadow_config_id_ctrl),
+        .shadow_signal_phase_increment_o
+                                        (dsp_shadow_signal_increment_ctrl),
+        .shadow_signal_phase_initial_o  (dsp_shadow_signal_initial_ctrl),
+        .shadow_signal_amplitude_o      (dsp_shadow_signal_amplitude_ctrl),
+        .shadow_noise_amplitude_o       (dsp_shadow_noise_amplitude_ctrl),
+        .shadow_noise_seed_o            (dsp_shadow_noise_seed_ctrl),
+        .shadow_lo_phase_increment_o    (dsp_shadow_lo_increment_ctrl),
+        .shadow_lo_phase_initial_o      (dsp_shadow_lo_initial_ctrl),
+        .commit_cmd_o                   (dsp_commit_cmd_ctrl),
+        .commit_busy_i                  (dsp_commit_busy_ctrl),
+        .commit_accepted_i              (dsp_commit_accepted_ctrl),
+        .commit_rejected_i              (dsp_commit_rejected_ctrl),
+        .commit_reject_reason_i         (dsp_commit_reject_reason_ctrl),
+        .active_valid_i                 (dsp_active_valid_ctrl),
+        .active_generation_i            (dsp_active_generation_ctrl),
+        .active_config_id_i             (dsp_active_config_id_ctrl),
+        .active_signal_phase_increment_i
+                                        (dsp_active_signal_increment_ctrl),
+        .active_signal_phase_initial_i  (dsp_active_signal_initial_ctrl),
+        .active_signal_amplitude_i      (dsp_active_signal_amplitude_ctrl),
+        .active_noise_amplitude_i       (dsp_active_noise_amplitude_ctrl),
+        .active_noise_seed_i            (dsp_active_noise_seed_ctrl),
+        .active_lo_phase_increment_i    (dsp_active_lo_increment_ctrl),
+        .active_lo_phase_initial_i      (dsp_active_lo_initial_ctrl)
+    );
+
+    assign dsp_config_safe_stream =
+        !stream_busy && !stream_armed && sequence_idle_stream &&
+        !start_pulse_stream && !arm_triggered_pulse_stream &&
+        !abort_pulse_stream && !soft_reset_pulse_stream &&
+        !sequence_arm_pulse_stream && !sequence_start_pulse_stream &&
+        !sequence_abort_pulse_stream && !sequence_soft_reset_pulse_stream;
+
+    qcrate_dsp_config_cdc u_dsp_config_cdc (
+        .ctrl_clk_i                      (clk_ctrl_i),
+        .ctrl_rst_n_i                    (rst_ctrl_n_i),
+        .shadow_config_id_i              (dsp_shadow_config_id_ctrl),
+        .shadow_signal_phase_increment_i (dsp_shadow_signal_increment_ctrl),
+        .shadow_signal_phase_initial_i   (dsp_shadow_signal_initial_ctrl),
+        .shadow_signal_amplitude_i       (dsp_shadow_signal_amplitude_ctrl),
+        .shadow_noise_amplitude_i        (dsp_shadow_noise_amplitude_ctrl),
+        .shadow_noise_seed_i             (dsp_shadow_noise_seed_ctrl),
+        .shadow_lo_phase_increment_i     (dsp_shadow_lo_increment_ctrl),
+        .shadow_lo_phase_initial_i       (dsp_shadow_lo_initial_ctrl),
+        .commit_cmd_i                    (dsp_commit_cmd_ctrl),
+        .commit_busy_o                   (dsp_commit_busy_ctrl),
+        .commit_accepted_o               (dsp_commit_accepted_ctrl),
+        .commit_rejected_o               (dsp_commit_rejected_ctrl),
+        .commit_reject_reason_o          (dsp_commit_reject_reason_ctrl),
+        .active_valid_ctrl_o             (dsp_active_valid_ctrl),
+        .active_generation_ctrl_o        (dsp_active_generation_ctrl),
+        .active_config_id_ctrl_o         (dsp_active_config_id_ctrl),
+        .active_signal_phase_increment_ctrl_o
+                                        (dsp_active_signal_increment_ctrl),
+        .active_signal_phase_initial_ctrl_o
+                                        (dsp_active_signal_initial_ctrl),
+        .active_signal_amplitude_ctrl_o  (dsp_active_signal_amplitude_ctrl),
+        .active_noise_amplitude_ctrl_o   (dsp_active_noise_amplitude_ctrl),
+        .active_noise_seed_ctrl_o        (dsp_active_noise_seed_ctrl),
+        .active_lo_phase_increment_ctrl_o(dsp_active_lo_increment_ctrl),
+        .active_lo_phase_initial_ctrl_o  (dsp_active_lo_initial_ctrl),
+        .stream_clk_i                    (clk_stream_i),
+        .stream_rst_n_i                  (rst_stream_n_i),
+        .safe_to_commit_i                (dsp_config_safe_stream),
+        .active_generation_stream_o      (dsp_active_generation_stream),
+        .active_config_id_stream_o       (dsp_active_config_id_stream),
+        .active_signal_phase_increment_stream_o
+                                        (dsp_active_signal_increment_stream),
+        .active_signal_phase_initial_stream_o
+                                        (dsp_active_signal_initial_stream),
+        .active_signal_amplitude_stream_o(dsp_active_signal_amplitude_stream),
+        .active_noise_amplitude_stream_o (dsp_active_noise_amplitude_stream),
+        .active_noise_seed_stream_o      (dsp_active_noise_seed_stream),
+        .active_lo_phase_increment_stream_o
+                                        (dsp_active_lo_increment_stream),
+        .active_lo_phase_initial_stream_o(dsp_active_lo_initial_stream)
     );
 
     // ============================================================
@@ -328,6 +469,7 @@ module qcrate_core #(
         .missed_trigger_count_i     (stream_missed_trigger_count_ctrl),
         .trigger_time_i             (stream_trigger_time_ctrl),
         .first_sample_time_i        (stream_first_sample_time_ctrl),
+        .capture_config_id_i        (stream_capture_config_id_ctrl),
 
         .irq_status_i               (irq_status_ctrl),
         .irq_enable_o               (irq_enable_ctrl),
@@ -570,6 +712,13 @@ module qcrate_core #(
         .rst_n_i                    (rst_stream_n_i),
         .enable_i                   (dsp_stream_enable),
         .clear_i                    (dsp_stream_clear),
+        .signal_phase_initial_i     (dsp_active_signal_initial_stream),
+        .signal_phase_increment_i   (dsp_active_signal_increment_stream),
+        .signal_amplitude_i         (dsp_active_signal_amplitude_stream),
+        .noise_amplitude_i          (dsp_active_noise_amplitude_stream),
+        .noise_seed_i               (dsp_active_noise_seed_stream),
+        .lo_phase_initial_i         (dsp_active_lo_initial_stream),
+        .lo_phase_increment_i       (dsp_active_lo_increment_stream),
         .m_data_o                   (dsp_stream_data),
         .m_valid_o                  (dsp_stream_valid),
         .m_ready_i                  (dsp_stream_ready)
@@ -588,6 +737,7 @@ module qcrate_core #(
         .soft_reset_i               (soft_reset_pulse_stream),
         .trigger_shot_id_i          (sequence_completed_shots_stream + 32'd1),
         .timebase_i                 (sequence_timebase_stream),
+        .config_id_i                (dsp_active_config_id_stream),
 
         .frame_length_i             (active_frame_length_stream),
         .frame_count_i              (active_frame_count_stream),
@@ -612,6 +762,7 @@ module qcrate_core #(
         .missed_trigger_count_o     (stream_missed_trigger_count),
         .trigger_time_o             (stream_trigger_time),
         .first_sample_time_o        (stream_first_sample_time),
+        .capture_config_id_o        (stream_capture_config_id),
 
         .completed_frames_o         (completed_frames_stream),
         .current_frame_id_o         (current_frame_id_stream),
@@ -646,6 +797,7 @@ module qcrate_core #(
         .missed_trigger_count_i     (stream_missed_trigger_count),
         .trigger_time_i             (stream_trigger_time),
         .first_sample_time_i        (stream_first_sample_time),
+        .capture_config_id_i        (stream_capture_config_id),
 
         .ctrl_clk_i                 (clk_ctrl_i),
         .ctrl_rst_n_i               (rst_ctrl_n_i),
@@ -662,7 +814,8 @@ module qcrate_core #(
         .trigger_count_o            (stream_trigger_count_ctrl),
         .missed_trigger_count_o     (stream_missed_trigger_count_ctrl),
         .trigger_time_o             (stream_trigger_time_ctrl),
-        .first_sample_time_o        (stream_first_sample_time_ctrl)
+        .first_sample_time_o        (stream_first_sample_time_ctrl),
+        .capture_config_id_o        (stream_capture_config_id_ctrl)
     );
 
     // ============================================================

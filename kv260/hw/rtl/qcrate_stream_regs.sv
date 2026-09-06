@@ -39,6 +39,7 @@ module qcrate_stream_regs (
     input  wire logic [31:0] missed_trigger_count_i,
     input  wire logic [63:0] trigger_time_i,
     input  wire logic [63:0] first_sample_time_i,
+    input  wire logic [63:0] capture_config_id_i,
 
     input  wire logic [31:0] irq_status_i,
     output logic [31:0]      irq_enable_o,
@@ -66,6 +67,8 @@ module qcrate_stream_regs (
     localparam logic [11:0] ADDR_TRIGGER_TIME_HIGH    = 12'h040;
     localparam logic [11:0] ADDR_FIRST_SAMPLE_TIME_LOW = 12'h044;
     localparam logic [11:0] ADDR_FIRST_SAMPLE_TIME_HIGH = 12'h048;
+    localparam logic [11:0] ADDR_CAPTURE_CONFIG_ID_LOW = 12'h04C;
+    localparam logic [11:0] ADDR_CAPTURE_CONFIG_ID_HIGH = 12'h050;
 
     logic        apb_access;
     logic        addr_mapped;
@@ -74,6 +77,7 @@ module qcrate_stream_regs (
     logic [31:0] control_word;
     logic [31:0] trigger_time_high_latch_q;
     logic [31:0] first_sample_time_high_latch_q;
+    logic [31:0] capture_config_id_high_latch_q;
 
     assign apb_access = psel_i && penable_i;
     assign pready_o = 1'b1;
@@ -186,6 +190,14 @@ module qcrate_stream_regs (
                 prdata_o = first_sample_time_high_latch_q;
             end
 
+            ADDR_CAPTURE_CONFIG_ID_LOW: begin
+                prdata_o = capture_config_id_i[31:0];
+            end
+
+            ADDR_CAPTURE_CONFIG_ID_HIGH: begin
+                prdata_o = capture_config_id_high_latch_q;
+            end
+
             default: begin
                 addr_mapped = 1'b0;
             end
@@ -208,6 +220,7 @@ module qcrate_stream_regs (
             irq_clear_o <= 32'h0000_0000;
             trigger_time_high_latch_q <= 32'h0000_0000;
             first_sample_time_high_latch_q <= 32'h0000_0000;
+            capture_config_id_high_latch_q <= 32'h0000_0000;
         end else begin
             start_cmd_o <= 1'b0;
             arm_triggered_cmd_o <= 1'b0;
@@ -221,6 +234,9 @@ module qcrate_stream_regs (
                 if (paddr_i == ADDR_FIRST_SAMPLE_TIME_LOW)
                     first_sample_time_high_latch_q <=
                         first_sample_time_i[63:32];
+                if (paddr_i == ADDR_CAPTURE_CONFIG_ID_LOW)
+                    capture_config_id_high_latch_q <=
+                        capture_config_id_i[63:32];
             end
 
             if (apb_access && pwrite_i && write_allowed) begin

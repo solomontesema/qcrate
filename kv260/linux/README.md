@@ -60,6 +60,12 @@ Inside the Q-Crate APB window:
 | `0x1008` | `STREAM.FRAME_COUNT` |
 | `0x100C` | `STREAM.STREAM_MODE` |
 | `0x1010` | `STREAM.STATUS` |
+| `0x104C` | `STREAM.CAPTURE_CONFIG_ID_LOW` |
+| `0x1050` | `STREAM.CAPTURE_CONFIG_ID_HIGH` |
+| `0x3000` | `DSP_CONFIG.COMMAND` |
+| `0x3004` | `DSP_CONFIG.STATUS` |
+| `0x3010–0x3030` | DSP shadow configuration bundle |
+| `0x3040–0x3060` | DSP active configuration readback |
 
 ## Create the xmutil package
 
