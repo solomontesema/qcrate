@@ -264,3 +264,130 @@ python3 kv260/linux/petalinux/scripts/petalinux_flow.py all \
 
 No Vivado or Vitis rebuild is required because DP-6D consumes the capture-ID
 registers and R5 configuration-status API already accepted in DP-6B/DP-6C.
+
+## DP-6E reproducible response sweep
+
+DP-6E turns runtime retuning into a measurement rather than a sequence of
+manually selected screenshots. Its machine-readable contract is
+[`qcrate_lo_sweep.schema.json`](qcrate_lo_sweep.schema.json). The tracked
+[`lo_sweep.json`](examples/lo_sweep.json) specification keeps the 30 MHz
+synthetic source fixed and moves the LO through ten explicit offsets covering:
+
+| Region | Source-to-LO offsets |
+|---|---|
+| Passband | 0, 1, and 2 MHz |
+| Transition band | 3, 4.125, 5, and 6 MHz |
+| Stopband | 6.25, 7, and 8 MHz |
+
+The base profile disables synthetic noise so attenuation in the deep stopband
+measures the DDC/FIR response rather than the configured noise floor. This is
+an intentional characterization profile, not a claim that a physical input is
+noiseless.
+
+`qcrate_sweep.py` first resolves every point atomically on the host. Each point
+must have a unique LO tuning word, DSP configuration ID, and full profile
+identity before the board is touched. Acquisition then uses the accepted
+single-experiment path and creates a fresh Data Plane v1 run for every point:
+
+```text
+tracked sweep specification
+  -> atomic plan + one resolved profile per LO point
+  -> R5-owned commit -> independent triggered run
+  -> recorder integrity + captured configuration identity
+  -> bit-exact IQ check + coherent complex estimator
+  -> magnitude/phase response + acceptance evidence
+```
+
+The coherent estimator discards the first 32 decimated outputs, which is later
+than the first complete 217-tap FIR window at output index 13. It projects the
+remaining complex samples onto the exact realized source-to-LO frequency.
+Frequencies above the 12.5 MS/s output Nyquist limit are projected at their
+known aliased output frequency while the FIR response remains labeled by the
+unaliased input offset. Magnitude is normalized to the designated DC reference.
+Phase is accepted only where the modeled normalized response is at least
+-50 dB; below that floor DP-6E reports attenuation but does not assign physical
+meaning to phase.
+
+### Plan without hardware
+
+Planning is a lightweight way to inspect all generated identities and values:
+
+```bash
+SWEEP=build/experiments/dp6e-$(date -u +%Y%m%dT%H%M%SZ)
+python3 host/experiment_profiles/qcrate_sweep.py plan \
+  --spec host/experiment_profiles/examples/lo_sweep.json \
+  --output "$SWEEP"
+```
+
+Plan publication is atomic. A malformed point, duplicate ID/tuning word,
+incorrect frequency-region label, or stale base profile leaves no partial
+plan at the requested output path.
+
+### Acquire the sweep on KV260
+
+Either use a new output path directly or continue the planned path above:
+
+```bash
+python3 host/experiment_profiles/qcrate_sweep.py run \
+  --spec host/experiment_profiles/examples/lo_sweep.json \
+  --output "$SWEEP" \
+  --board petalinux@192.168.1.93 \
+  --destination 192.168.1.92 \
+  --source 192.168.1.93 \
+  --shots 10 --banks 4 --rate-mbps 420
+```
+
+The command starts and closes the independent recorder once per point. SSH key
+authentication is recommended for unattended sweeps. Unless target device
+permissions or a narrowly scoped sudo policy have been configured, `sudo` may
+still request the target password for each independent experiment.
+
+If execution is interrupted, rerun the same command with `--resume`. Already
+verified points are skipped. An incomplete or invalid point directory is
+renamed with an `.interrupted-NN` suffix before a fresh run starts; unread or
+failed evidence is never overwritten silently.
+
+The sweep phase writes `dp6e-sweep.json` and `dp6e-sweep.png`. It requires all
+point runs to be complete and integrity-clean, all recorded configuration IDs
+to match their resolved profiles, and every IQ word to match the identity-
+selected bit-accurate model. In the deep stopband only magnitude is judged.
+
+### Safety and recovery acceptance
+
+After the sweep passes, run the closing acceptance command:
+
+```bash
+python3 host/experiment_profiles/qcrate_sweep_acceptance.py \
+  --sweep "$SWEEP" \
+  --board petalinux@192.168.1.93 \
+  --destination 192.168.1.92 \
+  --source 192.168.1.93 \
+  --banks 4 --rate-mbps 420
+```
+
+One target session verifies that R5 rejects an invalid amplitude, rejects a
+commit while the sequencer is armed, and retains staged state across separate
+`qcrate-control` processes. The host then terminates a real recorder before it
+receives data, preserves that interrupted run, starts a fresh one-shot
+experiment, and proves that the accepted recording cannot be verified against
+a stale resolved profile.
+
+Only this second phase can create `dp6e-acceptance.json` and
+`dp6e-acceptance.png`. Final `PASS` therefore means the scientific sweep,
+configuration provenance, bit-exact data, unsafe-transition rejection,
+interrupted-run recovery, and stale-ID detection all passed together.
+
+DP-6E adds no target binaries and requires no FPGA or OS rebuild after the
+accepted DP-6D deployment.
+
+### Accepted KV260 result
+
+DP-6E passed on real KV260 hardware on 12 September 2026. Ten runtime LO
+configurations measured the DDC passband, transition band, and stopband without
+rebuilding or reloading the FPGA or operating system. All 100 triggered shots
+and 409,600 recorded IQ words matched the configuration-selected bit-accurate
+model. Configuration IDs were distinct, magnitude and meaningful phase matched,
+and all five invalid-transition, restart, interrupted-run, and stale-identity
+checks passed.
+
+![DP-6E accepted runtime LO sweep](images/dp6e_acceptance.png)

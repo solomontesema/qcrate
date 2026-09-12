@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qcrate.dev/schemas/qcrate-lo-sweep-v1.json",
+  "title": "Q-Crate LO sweep v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "name", "base_profile", "phase_response_floor_db", "points"],
+  "properties": {
+    "format": {"const": "qcrate-lo-sweep-v1"},
+    "name": {"type": "string", "minLength": 1, "maxLength": 128},
+    "base_profile": {"type": "string", "minLength": 1},
+    "phase_response_floor_db": {"type": "number", "maximum": 0},
+    "points": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "lo_frequency_hz", "region", "reference"],
+        "properties": {
+          "label": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+          "lo_frequency_hz": {"type": "integer", "minimum": 0, "exclusiveMaximum": 100000000},
+          "region": {"enum": ["passband", "transition", "stopband"]},
+          "reference": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

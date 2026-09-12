@@ -1,0 +1,18 @@
+{
+  "format": "qcrate-lo-sweep-v1",
+  "name": "DP-6E DDC low-pass response",
+  "base_profile": "host/experiment_profiles/examples/lo_sweep_base.json",
+  "phase_response_floor_db": -50,
+  "points": [
+    {"label": "dc-reference", "lo_frequency_hz": 30000000, "region": "passband", "reference": true},
+    {"label": "pass-1mhz", "lo_frequency_hz": 29000000, "region": "passband", "reference": false},
+    {"label": "pass-edge-2mhz", "lo_frequency_hz": 28000000, "region": "passband", "reference": false},
+    {"label": "transition-3mhz", "lo_frequency_hz": 27000000, "region": "transition", "reference": false},
+    {"label": "cutoff-4p125mhz", "lo_frequency_hz": 25875000, "region": "transition", "reference": false},
+    {"label": "transition-5mhz", "lo_frequency_hz": 25000000, "region": "transition", "reference": false},
+    {"label": "transition-6mhz", "lo_frequency_hz": 24000000, "region": "transition", "reference": false},
+    {"label": "stop-edge-6p25mhz", "lo_frequency_hz": 23750000, "region": "stopband", "reference": false},
+    {"label": "stop-7mhz", "lo_frequency_hz": 23000000, "region": "stopband", "reference": false},
+    {"label": "stop-8mhz", "lo_frequency_hz": 22000000, "region": "stopband", "reference": false}
+  ]
+}
