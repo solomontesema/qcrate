@@ -64,6 +64,8 @@
 #define QCRATE_STREAM_TRIGGER_TIME_HI   0x1040U
 #define QCRATE_STREAM_FIRST_TIME_LO     0x1044U
 #define QCRATE_STREAM_FIRST_TIME_HI     0x1048U
+#define QCRATE_STREAM_CAPTURE_CONFIG_LO 0x104cU
+#define QCRATE_STREAM_CAPTURE_CONFIG_HI 0x1050U
 
 #define QCRATE_CONTROL_START            BIT(0)
 #define QCRATE_CONTROL_ABORT            BIT(1)
@@ -184,6 +186,7 @@ struct qcrate_capture_result {
 	u32 current_frame_id;
 	u32 current_sample_index;
 	u32 stall_cycles;
+	u64 captured_config_id;
 };
 
 static bool qcrate_pool_owns_buffer_locked(struct qcrate_dma_dev *qdma);
@@ -319,8 +322,8 @@ static int qcrate_submit_frames(struct qcrate_dma_dev *qdma,
 }
 
 /* APB low-word reads latch the matching high word in qcrate_stream_regs. */
-static u64 qcrate_read_timestamp(struct qcrate_dma_dev *qdma,
-				 u32 low_offset, u32 high_offset)
+static u64 qcrate_read_latched_u64(struct qcrate_dma_dev *qdma,
+				   u32 low_offset, u32 high_offset)
 {
 	u32 low = ioread32(qdma->regs + low_offset);
 	u32 high = ioread32(qdma->regs + high_offset);
@@ -421,6 +424,9 @@ static int qcrate_run_capture(struct qcrate_dma_dev *qdma,
 		qdma->regs + QCRATE_STREAM_CURRENT_SAMPLE);
 	result->stall_cycles = ioread32(
 		qdma->regs + QCRATE_STREAM_STALL_CYCLES);
+	result->captured_config_id = qcrate_read_latched_u64(
+		qdma, QCRATE_STREAM_CAPTURE_CONFIG_LO,
+		QCRATE_STREAM_CAPTURE_CONFIG_HI);
 
 	if (result->dma_result != DMA_TRANS_NOERROR ||
 	    result->last_residue_bytes ||
@@ -470,6 +476,7 @@ static int qcrate_capture(struct qcrate_dma_dev *qdma,
 	capture->current_frame_id = result.current_frame_id;
 	capture->current_sample_index = result.current_sample_index;
 	capture->stall_cycles = result.stall_cycles;
+	capture->captured_config_id = result.captured_config_id;
 	return ret;
 }
 
@@ -492,6 +499,7 @@ static int qcrate_capture_frames(struct qcrate_dma_dev *qdma,
 	capture->current_frame_id = result.current_frame_id;
 	capture->current_sample_index = result.current_sample_index;
 	capture->stall_cycles = result.stall_cycles;
+	capture->captured_config_id = result.captured_config_id;
 	return ret;
 }
 
@@ -684,12 +692,15 @@ static int qcrate_wait_triggered(struct qcrate_dma_dev *qdma,
 		qdma->regs + QCRATE_STREAM_TRIGGER_COUNT);
 	result->missed_trigger_count = ioread32(
 		qdma->regs + QCRATE_STREAM_MISSED_TRIGGERS);
-	result->trigger_time = qcrate_read_timestamp(
+	result->trigger_time = qcrate_read_latched_u64(
 		qdma, QCRATE_STREAM_TRIGGER_TIME_LO,
 		QCRATE_STREAM_TRIGGER_TIME_HI);
-	result->first_sample_time = qcrate_read_timestamp(
+	result->first_sample_time = qcrate_read_latched_u64(
 		qdma, QCRATE_STREAM_FIRST_TIME_LO,
 		QCRATE_STREAM_FIRST_TIME_HI);
+	result->captured_config_id = qcrate_read_latched_u64(
+		qdma, QCRATE_STREAM_CAPTURE_CONFIG_LO,
+		QCRATE_STREAM_CAPTURE_CONFIG_HI);
 	if (status & QCRATE_STATUS_TRIGGER_SEEN)
 		result->timestamp_flags |= QCRATE_DMA_TRIGGER_SEEN;
 	if (status & QCRATE_STATUS_FIRST_TIME_VALID)
@@ -986,12 +997,15 @@ static int qcrate_pool_finalize_locked(struct qcrate_dma_dev *qdma)
 		qdma->regs + QCRATE_STREAM_TRIGGER_COUNT);
 	result->missed_trigger_count = ioread32(
 		qdma->regs + QCRATE_STREAM_MISSED_TRIGGERS);
-	result->trigger_time = qcrate_read_timestamp(
+	result->trigger_time = qcrate_read_latched_u64(
 		qdma, QCRATE_STREAM_TRIGGER_TIME_LO,
 		QCRATE_STREAM_TRIGGER_TIME_HI);
-	result->first_sample_time = qcrate_read_timestamp(
+	result->first_sample_time = qcrate_read_latched_u64(
 		qdma, QCRATE_STREAM_FIRST_TIME_LO,
 		QCRATE_STREAM_FIRST_TIME_HI);
+	result->captured_config_id = qcrate_read_latched_u64(
+		qdma, QCRATE_STREAM_CAPTURE_CONFIG_LO,
+		QCRATE_STREAM_CAPTURE_CONFIG_HI);
 	if (status & QCRATE_STATUS_TRIGGER_SEEN)
 		result->timestamp_flags |= QCRATE_DMA_TRIGGER_SEEN;
 	if (status & QCRATE_STATUS_FIRST_TIME_VALID)
@@ -1458,6 +1472,7 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 		.abi_version = QCRATE_DMA_ABI_VERSION,
 		.feature_flags = QCRATE_DMA_CAP_DSP_MODE |
 			QCRATE_DMA_CAP_TRIGGERED |
+			QCRATE_DMA_CAP_CAPTURE_CONFIG_ID |
 			(qdma->has_sg ? (QCRATE_DMA_CAP_SG_CHAIN |
 					 QCRATE_DMA_CAP_BANK_POOL) : 0),
 		.max_chain_frames = qdma->has_sg ?
@@ -1474,7 +1489,8 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 	case QCRATE_DMA_IOC_CAPTURE:
 		if (copy_from_user(&capture, user_arg, sizeof(capture)))
 			return -EFAULT;
-		if (memchr_inv(capture.reserved, 0, sizeof(capture.reserved)))
+		if (capture.reserved0 || capture.captured_config_id ||
+		    memchr_inv(capture.reserved, 0, sizeof(capture.reserved)))
 			return -EINVAL;
 
 		ret = qcrate_capture(qdma, &capture);
@@ -1491,7 +1507,8 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 		if (copy_from_user(&capture_frames, user_arg,
 				   sizeof(capture_frames)))
 			return -EFAULT;
-		if (memchr_inv(capture_frames.reserved, 0,
+		if (capture_frames.captured_config_id ||
+		    memchr_inv(capture_frames.reserved, 0,
 			       sizeof(capture_frames.reserved)))
 			return -EINVAL;
 
@@ -1515,6 +1532,7 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 				   sizeof(triggered_result)))
 			return -EFAULT;
 		if (triggered_result.reserved0 ||
+		    triggered_result.captured_config_id ||
 		    memchr_inv(triggered_result.reserved, 0,
 			       sizeof(triggered_result.reserved)))
 			return -EINVAL;
@@ -1544,8 +1562,7 @@ static long qcrate_dma_ioctl(struct file *file, unsigned int command,
 		if (copy_from_user(&pool_dequeue, user_arg,
 				   sizeof(pool_dequeue)))
 			return -EFAULT;
-		if (memchr_inv(pool_dequeue.reserved, 0,
-			       sizeof(pool_dequeue.reserved)))
+		if (pool_dequeue.captured_config_id)
 			return -EINVAL;
 		ret = qcrate_pool_dequeue(qdma, &pool_dequeue);
 		if (copy_to_user(user_arg, &pool_dequeue,

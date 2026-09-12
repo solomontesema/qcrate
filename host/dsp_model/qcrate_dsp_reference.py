@@ -68,11 +68,69 @@ def lfsr_step(state: int) -> int:
 
 
 def generate_words(config_path: Path, table_dir: Path, output_count: int) -> list[int]:
-    """Generate packed Q[31:16]/I[15:0] words for the fixed DSP-2B source."""
+    """Generate packed Q[31:16]/I[15:0] words for one DSP v1 profile."""
     if output_count < 1:
         raise ValueError("output_count must be positive")
     config = json.loads(config_path.read_text(), parse_float=Decimal)
-    if config["sample_rate_hz"] != 200_000_000 or config["decimation"] != 16:
+    if config.get("format") == "qcrate-experiment-resolved-v1":
+        contract = config["numerical_contract"]
+        requested = config["dsp"]["requested"]
+        active = config["dsp"]["active"]
+        sample_rate_hz = int(contract["sample_rate_hz"])
+        decimation = int(contract["decimation"])
+        signal_increment = frequency_to_phase_word(
+            Decimal(requested["signal_frequency_hz"]), sample_rate_hz
+        )
+        lo_increment = frequency_to_phase_word(
+            Decimal(requested["lo_frequency_hz"]), sample_rate_hz
+        )
+        signal_phase = int(
+            (Decimal(requested["signal_phase_turns"]) * PHASE_MODULUS)
+            .to_integral_value(rounding=ROUND_HALF_UP)
+        ) & 0xFFFF_FFFF
+        lo_phase = int(
+            (Decimal(requested["lo_phase_turns"]) * PHASE_MODULUS)
+            .to_integral_value(rounding=ROUND_HALF_UP)
+        ) & 0xFFFF_FFFF
+        signal_amplitude = decimal_to_q1_15(Decimal(requested["signal_amplitude"]))
+        noise_amplitude = decimal_to_q1_15(Decimal(requested["noise_amplitude"]))
+        lfsr = int(requested["noise_seed"])
+        expected_active = {
+            "SIGNAL_PHASE_INCREMENT": signal_increment,
+            "SIGNAL_PHASE_INITIAL": signal_phase,
+            "SIGNAL_AMPLITUDE_Q1_15": signal_amplitude,
+            "NOISE_AMPLITUDE_Q1_15": noise_amplitude,
+            "NOISE_SEED": lfsr,
+            "LO_PHASE_INCREMENT": lo_increment,
+            "LO_PHASE_INITIAL": lo_phase,
+        }
+        for name, value in expected_active.items():
+            if active.get(name) != value:
+                raise ValueError(
+                    f"resolved {name} is {active.get(name)!r}, expected {value}"
+                )
+    else:
+        sample_rate_hz = int(config["sample_rate_hz"])
+        decimation = int(config["decimation"])
+        signal_increment = frequency_to_phase_word(
+            Decimal(config["signal_frequency_hz"]), sample_rate_hz
+        )
+        lo_increment = frequency_to_phase_word(
+            Decimal(config["lo_frequency_hz"]), sample_rate_hz
+        )
+        signal_phase = int(
+            (Decimal(config["signal_phase_turns"]) * PHASE_MODULUS)
+            .to_integral_value(rounding=ROUND_HALF_UP)
+        ) & 0xFFFF_FFFF
+        lo_phase = int(
+            (Decimal(config["lo_phase_turns"]) * PHASE_MODULUS)
+            .to_integral_value(rounding=ROUND_HALF_UP)
+        ) & 0xFFFF_FFFF
+        signal_amplitude = decimal_to_q1_15(Decimal(config["signal_amplitude"]))
+        noise_amplitude = decimal_to_q1_15(Decimal(config["noise_amplitude"]))
+        lfsr = int(config["noise_seed"])
+
+    if sample_rate_hz != 200_000_000 or decimation != DECIMATION:
         raise ValueError("DSP-2B requires the frozen 200 MHz, decimate-by-16 contract")
 
     sine_lut = load_signed_hex(
@@ -81,28 +139,10 @@ def generate_words(config_path: Path, table_dir: Path, output_count: int) -> lis
     coefficients = load_signed_hex(
         table_dir / "fir_decim16_q1_17.hex", 18, FIR_TAPS
     )
-    signal_increment = frequency_to_phase_word(
-        Decimal(config["signal_frequency_hz"]), config["sample_rate_hz"]
-    )
-    lo_increment = frequency_to_phase_word(
-        Decimal(config["lo_frequency_hz"]), config["sample_rate_hz"]
-    )
-    signal_phase = int(
-        (Decimal(config["signal_phase_turns"]) * PHASE_MODULUS)
-        .to_integral_value(rounding=ROUND_HALF_UP)
-    ) & 0xFFFF_FFFF
-    lo_phase = int(
-        (Decimal(config["lo_phase_turns"]) * PHASE_MODULUS)
-        .to_integral_value(rounding=ROUND_HALF_UP)
-    ) & 0xFFFF_FFFF
-    signal_amplitude = decimal_to_q1_15(Decimal(config["signal_amplitude"]))
-    noise_amplitude = decimal_to_q1_15(Decimal(config["noise_amplitude"]))
-    lfsr = int(config["noise_seed"])
-
     mixed_i: list[int] = []
     mixed_q: list[int] = []
     output_words: list[int] = []
-    for input_index in range(output_count * DECIMATION):
+    for input_index in range(output_count * decimation):
         lfsr = lfsr_step(lfsr)
         noise_q1_15 = lfsr - 0x8000
         source_cosine = nco_lookup(signal_phase + QUARTER_PHASE, sine_lut)
@@ -117,7 +157,7 @@ def generate_words(config_path: Path, table_dir: Path, output_count: int) -> lis
         signal_phase = (signal_phase + signal_increment) & 0xFFFF_FFFF
         lo_phase = (lo_phase + lo_increment) & 0xFFFF_FFFF
 
-        if (input_index % DECIMATION == DECIMATION - 1):
+        if (input_index % decimation == decimation - 1):
             valid_taps = min(FIR_TAPS, input_index + 1)
             sum_i = sum(
                 mixed_i[input_index - tap] * coefficients[tap]

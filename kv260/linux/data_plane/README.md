@@ -114,12 +114,16 @@ Q-Crate header. It corresponds to the approximately 419 Mb/s required by the
 400 Mb/s IQ payload and was accepted by the KV260-to-host baseline around this
 boundary. `--rate-mbps 0` deliberately disables pacing for diagnostics.
 
-## Stream Profiles
+## Runtime Stream Profiles
 
-The packet metadata is centralized in
-[`qcrate_stream_profiles.h`](../../../common/data_plane/qcrate_stream_profiles.h):
+The invariant rate and counter metadata is centralized in
+[`qcrate_stream_profiles.h`](../../../common/data_plane/qcrate_stream_profiles.h),
+but DSP identity is deliberately not compiled into the sender:
 
-- DSP mode identifies the tracked 200 MHz synthetic-ADC/DDC/FIR configuration;
+- DSP mode queries the R5-owned active configuration before starting;
+- each completed DMA result carries the ID snapshotted by PL at capture start;
+- the sender rejects zero, stale, or run-changing DSP identities;
+- STREAM_INFO carries that captured ID and the LO tuning word converted to Hz;
 - counter mode describes the 200 MHz frame/sample test pattern;
 - both use the shared 200 MHz Q-Crate timebase as their timestamp clock;
 - the one-shot compatibility path carries timestamp zero with
@@ -129,15 +133,23 @@ The packet metadata is centralized in
   remain invalid rather than manufacturing sub-shot precision.
 
 The DSP `config_id` is the first 64 bits of the canonical resolved DSP-profile
-SHA-256 introduced by DP-6. A focused test binds the deployed default to the
-tracked 29 MHz resolved profile. Inspect that identity with:
+SHA-256 introduced by DP-6. The R5 status snapshot, PL capture snapshot, DMA
+ABI, STREAM_INFO, QIDX record, and bundled resolved profile must all agree.
+This chain prevents a retune race from silently labeling samples with the
+wrong experiment. Inspect an identity with:
 
 ```bash
 python3 host/experiment_profiles/qcrate_profile.py show \
   host/experiment_profiles/examples/lo_29mhz.json
 ```
 
-Expected DSP configuration ID: `0x5db4fb578b27b09f`.
+The 29 MHz example resolves to `0x5db4fb578b27b09f`; other valid runtime
+profiles intentionally produce different IDs.
+
+DP-6D advances the DMA UAPI to version 2 while retaining every ioctl structure
+size and command number. Deploy `qcrate-dma`, `qcrate-dma-tools`, and
+`qcrate-streamer` from the same image. Mixed ABI v1/v2 components fail their
+version check instead of interpreting an absent identity as valid data.
 
 ## Source Map
 

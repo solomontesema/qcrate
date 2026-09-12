@@ -5,13 +5,14 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define QCRATE_DMA_ABI_VERSION 1U
+#define QCRATE_DMA_ABI_VERSION 2U
 #define QCRATE_DMA_IOC_MAGIC   'Q'
 
 #define QCRATE_DMA_CAP_SG_CHAIN      (1U << 0)
 #define QCRATE_DMA_CAP_DSP_MODE      (1U << 1)
 #define QCRATE_DMA_CAP_TRIGGERED     (1U << 2)
 #define QCRATE_DMA_CAP_BANK_POOL     (1U << 3)
+#define QCRATE_DMA_CAP_CAPTURE_CONFIG_ID (1U << 4)
 #define QCRATE_DMA_MAX_CHAIN_FRAMES  255U
 #define QCRATE_DMA_MAX_POOL_BANKS    64U
 #define QCRATE_DMA_BANK_NONE         0xffffffffU
@@ -47,7 +48,9 @@ struct qcrate_dma_capture {
 	__u32 current_sample_index;
 	__u32 stall_cycles;
 	__u32 stream_mode;
-	__u32 reserved[5];
+	__u32 reserved0;
+	__u64 captured_config_id;
+	__u32 reserved[2];
 };
 
 struct qcrate_dma_caps {
@@ -70,7 +73,8 @@ struct qcrate_dma_capture_frames {
 	__u32 current_sample_index;
 	__u32 stall_cycles;
 	__u32 stream_mode;
-	__u32 reserved[4];
+	__u64 captured_config_id;
+	__u32 reserved[2];
 };
 
 /* Configure and arm S2MM without starting the stream source. */
@@ -99,7 +103,8 @@ struct qcrate_dma_triggered_result {
 	__u32 reserved0;
 	__u64 trigger_time;
 	__u64 first_sample_time;
-	__u32 reserved[6];
+	__u64 captured_config_id;
+	__u32 reserved[4];
 };
 
 /* Configure a finite-shot bank pool and return after its first bank is armed. */
@@ -143,7 +148,7 @@ struct qcrate_dma_pool_dequeue {
 	__u64 trigger_time;
 	__u64 first_sample_time;
 	__u64 completion_mono_ns;
-	__u32 reserved[2];
+	__u64 captured_config_id;
 };
 
 /* Return exactly the bank granted by DEQUEUE; stale tokens are rejected. */
@@ -227,18 +232,30 @@ QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_info) == 32,
 			 "qcrate_dma_info ABI size changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_capture) == 64,
 			 "qcrate_dma_capture ABI size changed");
+QCRATE_DMA_STATIC_ASSERT(
+	__builtin_offsetof(struct qcrate_dma_capture, captured_config_id) == 48,
+	"qcrate_dma_capture config-ID offset changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_caps) == 32,
 			 "qcrate_dma_caps ABI size changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_capture_frames) == 64,
 			 "qcrate_dma_capture_frames ABI size changed");
+QCRATE_DMA_STATIC_ASSERT(
+	__builtin_offsetof(struct qcrate_dma_capture_frames, captured_config_id) == 48,
+	"qcrate_dma_capture_frames config-ID offset changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_triggered_arm) == 32,
 			 "qcrate_dma_triggered_arm ABI size changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_triggered_result) == 96,
 			 "qcrate_dma_triggered_result ABI size changed");
+QCRATE_DMA_STATIC_ASSERT(
+	__builtin_offsetof(struct qcrate_dma_triggered_result, captured_config_id) == 72,
+	"qcrate_dma_triggered_result config-ID offset changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_pool_start) == 64,
 			 "qcrate_dma_pool_start ABI size changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_pool_dequeue) == 128,
 			 "qcrate_dma_pool_dequeue ABI size changed");
+QCRATE_DMA_STATIC_ASSERT(
+	__builtin_offsetof(struct qcrate_dma_pool_dequeue, captured_config_id) == 120,
+	"qcrate_dma_pool_dequeue config-ID offset changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_pool_release) == 32,
 			 "qcrate_dma_pool_release ABI size changed");
 QCRATE_DMA_STATIC_ASSERT(sizeof(struct qcrate_dma_pool_status) == 128,

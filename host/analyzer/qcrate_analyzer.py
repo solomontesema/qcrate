@@ -19,18 +19,22 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 DSP_DIR = ROOT / "host" / "dsp_model"
+PROFILE_DIR = ROOT / "host" / "experiment_profiles"
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(DSP_DIR))
+sys.path.insert(0, str(PROFILE_DIR))
 
 import qcrate_capture_viewer as capture_viewer  # noqa: E402
 import qcrate_dsp as dsp  # noqa: E402
 import qcrate_dsp_reference as deployed_reference  # noqa: E402
+import qcrate_profile as experiment_profile  # noqa: E402
 from qcrate_run import RunBundle, RunHealth, RunIndex, ShotRecord  # noqa: E402
 
 
 DEFAULT_SAMPLE_RATE_HZ = 12_500_000.0
 DEFAULT_CONFIG = DSP_DIR / "configs" / "tone_1mhz.json"
 TABLE_MANIFEST = ROOT / "rtl" / "dsp" / "tables" / "manifest.json"
+RUN_PROFILE_NAME = "experiment.resolved.json"
 SHOT_WINDOW_SIZE = 512
 SELECTION_DEBOUNCE_MS = 90
 
@@ -65,12 +69,44 @@ def expected_words(config_text: str, count: int) -> np.ndarray:
     )
 
 
+@lru_cache(maxsize=16)
+def resolved_config_id(config_text: str) -> int:
+    document = experiment_profile.load_resolved_profile(Path(config_text))
+    return int(document["identity"]["dsp_config_id"], 0)
+
+
+@lru_cache(maxsize=16)
+def reference_config_id(config_text: str) -> int:
+    path = Path(config_text)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    if document.get("format") == experiment_profile.RESOLVED_FORMAT:
+        return resolved_config_id(config_text)
+    return current_config_id(path)
+
+
+def reference_config(
+    bundle: RunBundle | RunIndex,
+    shot: ShotRecord,
+    explicit: Path | None = None,
+) -> Path | None:
+    """Select only a reference whose deterministic ID matches the shot."""
+    if explicit is not None:
+        candidate = explicit.resolve()
+        candidate_id = reference_config_id(str(candidate))
+        return candidate if shot.config_id == candidate_id else None
+
+    bundled = bundle.path / RUN_PROFILE_NAME
+    if bundled.exists():
+        return bundled if shot.config_id == resolved_config_id(str(bundled)) else None
+    return DEFAULT_CONFIG if shot.config_id == current_config_id() else None
+
+
 def analyze_shot(
     bundle: RunBundle | RunIndex,
     shot: ShotRecord,
     *,
     fallback_sample_rate_hz: float = DEFAULT_SAMPLE_RATE_HZ,
-    config: Path = DEFAULT_CONFIG,
+    config: Path | None = None,
 ) -> ShotAnalysis:
     if shot.payload_format != 2 or shot.sample_bytes_per_word != 4:
         raise ValueError(
@@ -93,8 +129,9 @@ def analyze_shot(
     peak_index = int(np.argmax(levels))
     magnitude = np.abs(capture.complex_samples)
     mismatches = None
-    if shot.config_id == current_config_id(config):
-        expected = expected_words(str(config.resolve()), len(capture.words))
+    selected_config = reference_config(bundle, shot, config)
+    if selected_config is not None:
+        expected = expected_words(str(selected_config.resolve()), len(capture.words))
         mismatches = int(np.count_nonzero(capture.words != expected))
     return ShotAnalysis(
         shot=shot,
@@ -192,7 +229,8 @@ def render_analysis(figure: object, analysis: ShotAnalysis) -> None:
     figure.suptitle(
         f"Q-Crate shot {analysis.shot.shot_id} | "
         f"{len(capture.words):,} IQ samples | "
-        f"peak {analysis.dominant_frequency_hz / 1e6:.6f} MHz | {reference}",
+        f"peak {analysis.dominant_frequency_hz / 1e6:.6f} MHz\n"
+        f"config 0x{analysis.shot.config_id:016x} | {reference}",
         fontsize=13,
         color="#111827",
     )

@@ -366,6 +366,165 @@ def compile_profile(path: Path) -> dict[str, Any]:
     }
 
 
+def validate_resolved_profile(document: dict[str, Any]) -> dict[str, Any]:
+    """Validate a resolved profile and recompute both deterministic identities."""
+    root = _check_keys(
+        document,
+        required={
+            "format", "name", "identity", "numerical_contract", "dsp",
+            "acquisition", "sequence", "register_writes",
+        },
+        context="resolved profile",
+    )
+    if root["format"] != RESOLVED_FORMAT:
+        raise ProfileError(f"resolved format must be {RESOLVED_FORMAT!r}")
+    identity = _check_keys(
+        root["identity"],
+        required={"profile_sha256", "dsp_config_sha256", "dsp_config_id"},
+        context="resolved identity",
+    )
+    dsp = _check_keys(
+        root["dsp"], required={"requested", "active", "realized"},
+        context="resolved dsp",
+    )
+    requested = _check_keys(
+        dsp["requested"],
+        required={
+            "signal_frequency_hz", "signal_phase_turns", "signal_amplitude",
+            "noise_amplitude", "noise_seed", "lo_frequency_hz",
+            "lo_phase_turns",
+        },
+        context="resolved requested DSP",
+    )
+    realized = _check_keys(
+        dsp["realized"],
+        required={
+            "signal_frequency_hz", "lo_frequency_hz", "baseband_frequency_hz",
+        },
+        context="resolved realized DSP",
+    )
+    active = _check_keys(
+        dsp["active"],
+        required={
+            "SIGNAL_PHASE_INCREMENT", "SIGNAL_PHASE_INITIAL",
+            "SIGNAL_AMPLITUDE_Q1_15", "NOISE_AMPLITUDE_Q1_15", "NOISE_SEED",
+            "LO_PHASE_INCREMENT", "LO_PHASE_INITIAL",
+        },
+        context="resolved active DSP",
+    )
+    acquisition = _check_keys(
+        root["acquisition"],
+        required={
+            "frame_length_words", "frame_count", "stream_mode",
+            "stream_mode_value",
+        },
+        context="resolved acquisition",
+    )
+    sequence = _check_keys(
+        root["sequence"],
+        required={
+            "source", "image_sha256", "payload_crc32", "event_count", "tick_hz",
+        },
+        context="resolved sequence",
+    )
+
+    tables, registers = _load_contracts()
+    if root["numerical_contract"] != _numerical_contract(tables):
+        raise ProfileError("resolved numerical contract differs from tracked DSP tables")
+    try:
+        signal_frequency = Decimal(requested["signal_frequency_hz"])
+        lo_frequency = Decimal(requested["lo_frequency_hz"])
+        signal_phase = Decimal(requested["signal_phase_turns"])
+        lo_phase = Decimal(requested["lo_phase_turns"])
+        signal_amplitude = Decimal(requested["signal_amplitude"])
+        noise_amplitude = Decimal(requested["noise_amplitude"])
+        noise_seed = _integer(
+            requested["noise_seed"], minimum=1, maximum=0xFFFF,
+            context="resolved noise seed",
+        )
+    except (ArithmeticError, TypeError, ValueError) as error:
+        raise ProfileError("resolved requested DSP values are malformed") from error
+    nyquist = Decimal(SAMPLE_RATE_HZ) / 2
+    if not (0 <= signal_frequency < nyquist and 0 <= lo_frequency < nyquist):
+        raise ProfileError("resolved frequencies are outside [0, Nyquist)")
+    if not (0 <= signal_phase < 1 and 0 <= lo_phase < 1):
+        raise ProfileError("resolved phases are outside [0, 1) turns")
+    if not (0 <= signal_amplitude <= 1 and 0 <= noise_amplitude <= 1 and
+            signal_amplitude + noise_amplitude <= 1):
+        raise ProfileError("resolved amplitudes violate the Q1.15 source contract")
+    expected_active = {
+        "SIGNAL_PHASE_INCREMENT": _phase_word(signal_frequency, SAMPLE_RATE_HZ),
+        "SIGNAL_PHASE_INITIAL": _phase_word(signal_phase, 1),
+        "SIGNAL_AMPLITUDE_Q1_15": _q1_15(signal_amplitude),
+        "NOISE_AMPLITUDE_Q1_15": _q1_15(noise_amplitude),
+        "NOISE_SEED": noise_seed,
+        "LO_PHASE_INCREMENT": _phase_word(lo_frequency, SAMPLE_RATE_HZ),
+        "LO_PHASE_INITIAL": _phase_word(lo_phase, 1),
+    }
+    if active != expected_active:
+        raise ProfileError("resolved active DSP values differ from requested values")
+    realized_signal = Decimal(active["SIGNAL_PHASE_INCREMENT"]) * SAMPLE_RATE_HZ / PHASE_MODULUS
+    realized_lo = Decimal(active["LO_PHASE_INCREMENT"]) * SAMPLE_RATE_HZ / PHASE_MODULUS
+    expected_realized = {
+        "signal_frequency_hz": _decimal_string(realized_signal),
+        "lo_frequency_hz": _decimal_string(realized_lo),
+        "baseband_frequency_hz": _decimal_string(realized_signal - realized_lo),
+    }
+    if realized != expected_realized:
+        raise ProfileError("resolved realized frequencies differ from active words")
+    frame_length = _integer(
+        acquisition["frame_length_words"], minimum=1, maximum=262_144,
+        context="resolved frame length",
+    )
+    frame_count = _integer(
+        acquisition["frame_count"], minimum=1, maximum=255,
+        context="resolved frame count",
+    )
+    if (acquisition["stream_mode"] != "dsp" or
+            acquisition["stream_mode_value"] != 1 or
+            frame_length * frame_count > 1_000_000):
+        raise ProfileError("resolved acquisition geometry is invalid")
+    try:
+        config_id = int(identity["dsp_config_id"], 0)
+    except (TypeError, ValueError) as error:
+        raise ProfileError("resolved DSP configuration ID is malformed") from error
+    if not 1 <= config_id <= 0xFFFF_FFFF_FFFF_FFFF:
+        raise ProfileError("resolved DSP configuration ID is out of range")
+
+    dsp_digest = _sha256({
+        "format": DSP_IDENTITY_FORMAT,
+        "numerical_contract": root["numerical_contract"],
+        "active": active,
+    })
+    if identity["dsp_config_sha256"] != dsp_digest or config_id != int(
+        dsp_digest[:16], 16
+    ):
+        raise ProfileError("resolved DSP identity does not match its active values")
+    profile_digest = _sha256({
+        "format": PROFILE_IDENTITY_FORMAT,
+        "dsp_config_sha256": dsp_digest,
+        "acquisition": acquisition,
+        "sequence": {
+            "image_sha256": sequence["image_sha256"],
+            "event_count": sequence["event_count"],
+            "tick_hz": sequence["tick_hz"],
+        },
+    })
+    if identity["profile_sha256"] != profile_digest:
+        raise ProfileError("resolved experiment identity does not match its contract")
+    if root["register_writes"] != _register_writes(active, config_id, registers):
+        raise ProfileError("resolved register writes differ from active DSP values")
+
+    # This also checks integer ranges and acquisition geometry.
+    configuration_command(root, "qcrate-control")
+    return root
+
+
+def load_resolved_profile(path: Path) -> dict[str, Any]:
+    """Load one resolved profile with duplicate-key and identity validation."""
+    return validate_resolved_profile(_load_json(path))
+
+
 def _write_json(path: Path, document: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -518,7 +677,7 @@ def main() -> int:
             return 0
 
         if args.command in ("command", "apply"):
-            resolved = _load_json(args.resolved.resolve())
+            resolved = load_resolved_profile(args.resolved.resolve())
             command = configuration_command(resolved, args.control)
             if args.command == "command":
                 print(shlex.join(command))

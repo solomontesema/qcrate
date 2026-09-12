@@ -57,6 +57,7 @@ class ResolutionTests(unittest.TestCase):
     def test_tracked_resolved_profile_is_current_and_loadable(self) -> None:
         tracked = json.loads(LO_29_RESOLVED.read_text(encoding="ascii"))
         self.assertEqual(tracked, self.lo_29)
+        self.assertEqual(profile.load_resolved_profile(LO_29_RESOLVED), tracked)
         config = dsp.load_config(LO_29_RESOLVED)
         self.assertEqual(config.lo_frequency_hz, 29_000_000)
 
@@ -65,6 +66,17 @@ class ResolutionTests(unittest.TestCase):
         document["dsp"]["active"]["LO_PHASE_INCREMENT"] += 1
         with self.assertRaises(dsp.DspConfigurationError):
             dsp.config_from_resolved_document(document)
+
+    def test_resolved_loader_rejects_tampered_identity_input(self) -> None:
+        document = copy.deepcopy(self.lo_29)
+        document["dsp"]["active"]["LO_PHASE_INCREMENT"] += 1
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", dir=REPO_ROOT, encoding="utf-8"
+        ) as stream:
+            json.dump(document, stream)
+            stream.flush()
+            with self.assertRaises(profile.ProfileError):
+                profile.load_resolved_profile(Path(stream.name))
 
     def test_display_name_does_not_change_identity(self) -> None:
         source = json.loads(LO_29.read_text(encoding="utf-8"))

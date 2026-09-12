@@ -1,36 +1,27 @@
 #!/usr/bin/env python3
-"""Keep the deployed DSP stream identity tied to its canonical sources."""
+"""Keep deployed DSP stream identity tied to captured runtime state."""
 from __future__ import annotations
 
-import json
-import re
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-RESOLVED_PROFILE = (
-    ROOT
-    / "host"
-    / "experiment_profiles"
-    / "examples"
-    / "resolved"
-    / "lo_29mhz.resolved.json"
-)
 PROFILE_HEADER = ROOT / "common" / "data_plane" / "qcrate_stream_profiles.h"
+STREAMER = ROOT / "kv260" / "linux" / "data_plane" / "qcrate_streamer.c"
+DMA_UAPI = ROOT / "common" / "dma" / "qcrate_dma_uapi.h"
 
 
 class StreamProfileTests(unittest.TestCase):
-    def test_dsp_config_id_matches_tracked_sources(self) -> None:
-        profile = json.loads(RESOLVED_PROFILE.read_text(encoding="utf-8"))
-        expected = profile["identity"]["dsp_config_id"].removeprefix("0x")
-        match = re.search(
-            r"QCRATE_DSP_CONFIG_ID\s+UINT64_C\(0x([0-9a-f]{16})\)",
-            PROFILE_HEADER.read_text(),
-        )
-        self.assertIsNotNone(match)
-        assert match is not None
-        self.assertEqual(match.group(1), expected)
+    def test_dsp_identity_is_not_a_compiled_stream_constant(self) -> None:
+        self.assertNotIn("QCRATE_DSP_CONFIG_ID", PROFILE_HEADER.read_text())
+
+    def test_streamer_requires_hardware_captured_identity(self) -> None:
+        source = STREAMER.read_text()
+        self.assertIn("QCRATE_DMA_CAP_CAPTURE_CONFIG_ID", source)
+        self.assertIn("bank->captured_config_id != context->config_id", source)
+        self.assertIn("capture.captured_config_id != config_id", source)
+        self.assertIn("QCRATE_DMA_CAP_CAPTURE_CONFIG_ID", DMA_UAPI.read_text())
 
 
 if __name__ == "__main__":

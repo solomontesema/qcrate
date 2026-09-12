@@ -119,8 +119,7 @@ def evaluate_run(
            "last": timestamps[-1] if timestamps else None},
           "present and strictly increasing")
 
-    expected_config = analyzer.current_config_id()
-    reference_words: np.ndarray | None = None
+    reference_words: dict[tuple[str, int], np.ndarray] = {}
     checked_words = 0
     reference_mismatches = 0
     crc_mismatches = 0
@@ -129,15 +128,17 @@ def evaluate_run(
         payload = bundle.read_samples(shot)
         if (binascii.crc32(payload) & 0xFFFFFFFF) != shot.payload_crc32:
             crc_mismatches += 1
-        if shot.config_id != expected_config:
+        selected_config = analyzer.reference_config(bundle, shot)
+        if selected_config is None:
             unexpected_configs.add(shot.config_id)
             continue
         words = np.frombuffer(payload, dtype="<u4")
-        if reference_words is None or len(reference_words) != len(words):
-            reference_words = analyzer.expected_words(
-                str(analyzer.DEFAULT_CONFIG.resolve()), len(words)
-            )
-        reference_mismatches += int(np.count_nonzero(words != reference_words))
+        reference_key = (str(selected_config.resolve()), len(words))
+        expected = reference_words.get(reference_key)
+        if expected is None:
+            expected = analyzer.expected_words(*reference_key)
+            reference_words[reference_key] = expected
+        reference_mismatches += int(np.count_nonzero(words != expected))
         checked_words += len(words)
     check("published_payload_crc", crc_mismatches == 0, crc_mismatches,
           "0 mismatched shot payloads")
@@ -146,7 +147,7 @@ def evaluate_run(
            "mismatches": reference_mismatches,
            "unexpected_config_ids": [f"0x{value:016x}"
                                      for value in sorted(unexpected_configs)]},
-          "every published IQ word matches the canonical model")
+          "every published IQ word matches its identity-selected model")
 
     clean_pass = all(item["pass"] for item in checks)
     fault_document: dict[str, Any] | None = None

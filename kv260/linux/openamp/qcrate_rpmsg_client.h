@@ -12,6 +12,20 @@ struct qcrate_rpmsg_client {
 	uint32_t next_transaction_id;
 };
 
+/* Coherent active configuration snapshot owned and validated by R5-0. */
+struct qcrate_runtime_config_status {
+	uint32_t flags;
+	uint32_t pl_status;
+	uint32_t pl_reject_reason;
+	uint32_t active_generation;
+	uint64_t config_id;
+	uint32_t signal_phase_increment;
+	uint32_t lo_phase_increment;
+	uint32_t frame_length_words;
+	uint32_t frame_count;
+	uint32_t reason;
+};
+
 int qcrate_rpmsg_discover(char *device_path, size_t capacity);
 int qcrate_rpmsg_client_open(struct qcrate_rpmsg_client *client,
 			     const char *device_path, int timeout_ms);
@@ -28,5 +42,9 @@ int qcrate_rpmsg_client_exchange(
 	const uint32_t *request_words,
 	size_t request_word_count,
 	struct qcrate_rpmsg_message *response);
+
+int qcrate_rpmsg_get_runtime_config(
+	struct qcrate_rpmsg_client *client,
+	struct qcrate_runtime_config_status *status);
 
 #endif /* QCRATE_RPMSG_CLIENT_H */

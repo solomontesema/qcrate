@@ -60,6 +60,8 @@
 #define QCRATE_SEQ_STATUS_ARMED        (UINT32_C(1) << 2)
 #define QCRATE_SEQ_STATUS_FAULTED      (UINT32_C(1) << 4)
 #define QCRATE_SEQ_STATUS_MEMORY_LOCKED (UINT32_C(1) << 9)
+#define QCRATE_DSP_CONFIG_STATUS_VALID (UINT32_C(1) << 2)
+#define QCRATE_DSP_CONFIG_STATUS_MASK  UINT32_C(0x0000000f)
 
 struct options {
 	const char *destination;
@@ -118,6 +120,8 @@ struct sustained_context {
 	size_t buffer_bytes;
 	struct udp_emitter *emitter;
 	struct qcrate_rpmsg_client *rpmsg;
+	uint64_t config_id;
+	int64_t center_frequency_hz;
 	struct bank_queue queue;
 	uint64_t pool_run_id;
 	uint64_t packet_sequence;
@@ -544,6 +548,7 @@ error:
 }
 
 static void fill_profile(const struct options *options,
+			 uint64_t config_id, int64_t center_frequency_hz,
 			 struct qcrate_data_packetizer_config *profile)
 {
 	*profile = (struct qcrate_data_packetizer_config) {
@@ -561,11 +566,11 @@ static void fill_profile(const struct options *options,
 		profile->payload_format = QCRATE_DATA_FORMAT_IQ_S16_LE;
 		profile->sample_rate_numerator = QCRATE_DSP_SAMPLE_RATE_HZ;
 		profile->timestamp_rate_numerator = QCRATE_DSP_TIMEBASE_RATE_HZ;
-		profile->center_frequency_hz = QCRATE_DSP_CENTER_FREQUENCY_HZ;
+		profile->center_frequency_hz = center_frequency_hz;
 		profile->channel_count = 2;
 		profile->component_bits = 16;
 		profile->fraction_bits = 15;
-		profile->config_id = QCRATE_DSP_CONFIG_ID;
+		profile->config_id = config_id;
 	} else {
 		profile->payload_format = QCRATE_DATA_FORMAT_COUNTER_U32_LE;
 		profile->sample_rate_numerator = QCRATE_COUNTER_SAMPLE_RATE_HZ;
@@ -575,6 +580,41 @@ static void fill_profile(const struct options *options,
 		profile->component_bits = 32;
 		profile->config_id = QCRATE_COUNTER_CONFIG_ID;
 	}
+}
+
+static int load_active_dsp_profile(
+	struct qcrate_rpmsg_client *rpmsg, const struct options *options,
+	uint64_t *config_id, int64_t *center_frequency_hz)
+{
+	struct qcrate_runtime_config_status active;
+	uint64_t rounded_hz;
+
+	if (qcrate_rpmsg_get_runtime_config(rpmsg, &active))
+		return -1;
+	if (!active.config_id || active.reason != QCRATE_CONFIG_REASON_NONE ||
+	    active.pl_reject_reason ||
+	    (active.pl_status & QCRATE_DSP_CONFIG_STATUS_MASK) !=
+		QCRATE_DSP_CONFIG_STATUS_VALID ||
+	    active.frame_length_words != options->words ||
+	    active.frame_count != options->frames) {
+		fprintf(stderr,
+			"active DSP profile is unusable: id=0x%016" PRIx64
+			" status=0x%08" PRIx32 " reject=%" PRIu32
+			" reason=%" PRIu32 " geometry=%" PRIu32 "x%" PRIu32
+			" (requested %" PRIu32 "x%" PRIu32 ")\n",
+			active.config_id, active.pl_status,
+			active.pl_reject_reason, active.reason,
+			active.frame_length_words, active.frame_count,
+			options->words, options->frames);
+		errno = EPROTO;
+		return -1;
+	}
+
+	rounded_hz = ((uint64_t)active.lo_phase_increment *
+		QCRATE_DSP_TIMEBASE_RATE_HZ + (UINT64_C(1) << 31U)) >> 32U;
+	*config_id = active.config_id;
+	*center_frequency_hz = (int64_t)rounded_hz;
+	return 0;
 }
 
 static void handle_stop_signal(int signal_number)
@@ -849,6 +889,8 @@ static int validate_bank(const struct sustained_context *context,
 	    bank->frame_length_words != context->options->words ||
 	    bank->frame_count != context->options->frames ||
 	    bank->stream_mode != context->options->stream_mode ||
+	    (context->options->stream_mode == QCRATE_STREAM_MODE_DSP &&
+	     bank->captured_config_id != context->config_id) ||
 	    !bank->trigger_shot_id || bank->trigger_count != 1 ||
 	    !(bank->timestamp_flags & QCRATE_DMA_TRIGGER_SEEN) ||
 	    !(bank->timestamp_flags & QCRATE_DMA_FIRST_SAMPLE_TIME_VALID)) {
@@ -856,6 +898,19 @@ static int validate_bank(const struct sustained_context *context,
 		return -1;
 	}
 	return 0;
+}
+
+static int release_bank(struct sustained_context *context,
+			const struct qcrate_dma_pool_dequeue *bank)
+{
+	struct qcrate_dma_pool_release release = {
+		.bank_index = bank->bank_index,
+		.bank_generation = bank->bank_generation,
+		.run_id = bank->run_id,
+		.bank_sequence = bank->bank_sequence,
+	};
+
+	return ioctl(context->device_fd, QCRATE_DMA_IOC_POOL_RELEASE, &release);
 }
 
 static void *acquisition_thread(void *argument)
@@ -896,12 +951,17 @@ static void *acquisition_thread(void *argument)
 			break;
 		}
 		if (validate_bank(context, &bank)) {
-			pipeline_fail(context, "DMA bank evidence validation", errno);
+			int validation_errno = errno;
+
+			(void)release_bank(context, &bank);
+			pipeline_fail(context, "DMA bank evidence validation",
+				      validation_errno);
 			break;
 		}
 		if (have_previous &&
 		    (bank.trigger_shot_id <= previous_shot_id ||
 		     bank.first_sample_time <= previous_first_sample_time)) {
+			(void)release_bank(context, &bank);
 			pipeline_fail(context,
 				      "non-monotonic hardware shot evidence", EPROTO);
 			break;
@@ -912,11 +972,17 @@ static void *acquisition_thread(void *argument)
 		context->dma_stall_cycles += bank.stall_cycles;
 		context->missed_trigger_count += bank.missed_trigger_count;
 		if (sequence_wait_idle(context)) {
-			pipeline_fail(context, "R5 sequence completion", errno);
+			int sequence_errno = errno;
+
+			(void)release_bank(context, &bank);
+			pipeline_fail(context, "R5 sequence completion",
+				      sequence_errno);
 			break;
 		}
-		if (queue_push(&context->queue, &bank))
+		if (queue_push(&context->queue, &bank)) {
+			(void)release_bank(context, &bank);
 			break;
+		}
 		context->acquired_shots++;
 		shot++;
 	}
@@ -924,19 +990,6 @@ done:
 	context->capture_end_monotonic_ns = clock_nanoseconds(CLOCK_MONOTONIC);
 	queue_finish(&context->queue);
 	return NULL;
-}
-
-static int release_bank(struct sustained_context *context,
-			const struct qcrate_dma_pool_dequeue *bank)
-{
-	struct qcrate_dma_pool_release release = {
-		.bank_index = bank->bank_index,
-		.bank_generation = bank->bank_generation,
-		.run_id = bank->run_id,
-		.bank_sequence = bank->bank_sequence,
-	};
-
-	return ioctl(context->device_fd, QCRATE_DMA_IOC_POOL_RELEASE, &release);
 }
 
 static void *sender_thread(void *argument)
@@ -949,7 +1002,8 @@ static void *sender_thread(void *argument)
 	int packet_status;
 
 	while ((pop_status = queue_pop(&context->queue, &bank)) > 0) {
-		fill_profile(context->options, &profile);
+		fill_profile(context->options, context->config_id,
+			     context->center_frequency_hz, &profile);
 		profile.run_id = context->options->run_id;
 		profile.shot_id = bank.trigger_shot_id;
 		profile.initial_sequence = context->packet_sequence;
@@ -963,6 +1017,7 @@ static void *sender_thread(void *argument)
 			int error_number = context->emitter->error_number ?
 				context->emitter->error_number : EPROTO;
 
+			(void)release_bank(context, &bank);
 			pipeline_fail(context, "UDP packetization/transmission",
 				      error_number);
 			break;
@@ -1183,6 +1238,8 @@ static int write_sender_report(const struct sustained_context *context,
 		"  \"run_id\": \"0x%016" PRIx64 "\",\n"
 		"  \"stream_id\": \"0x%08" PRIx32 "\",\n"
 		"  \"pool_run_id\": \"0x%016" PRIx64 "\",\n"
+		"  \"stream\": {\"config_id\": \"0x%016" PRIx64
+		"\", \"center_frequency_hz\": %" PRId64 "},\n"
 		"  \"requested\": {\"mode\": \"%s\", \"shots\": %" PRIu64
 		", \"duration_seconds\": %" PRIu32 ", \"banks\": %" PRIu32 "},\n"
 		"  \"timing\": {\"start_monotonic_ns\": %" PRIu64
@@ -1212,6 +1269,7 @@ static int write_sender_report(const struct sustained_context *context,
 		"}\n",
 		context->success ? "true" : "false", context->options->run_id,
 		context->options->stream_id, context->pool_run_id,
+		context->config_id, context->center_frequency_hz,
 		context->options->duration_mode ? "duration" : "shot_count",
 		context->options->triggered_shots, context->options->duration_seconds,
 		context->options->bank_count, context->start_monotonic_ns,
@@ -1259,6 +1317,8 @@ int main(int argc, char **argv)
 	struct qcrate_rpmsg_client rpmsg = {.file_descriptor = -1};
 	struct sustained_context sustained = {0};
 	struct options options;
+	uint64_t config_id = QCRATE_COUNTER_CONFIG_ID;
+	int64_t center_frequency_hz = 0;
 	size_t total_bytes;
 	void *buffer = MAP_FAILED;
 	int actual_send_buffer;
@@ -1313,6 +1373,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "driver does not advertise DSP stream mode\n");
 		goto out;
 	}
+	if (options.stream_mode == QCRATE_STREAM_MODE_DSP &&
+	    !(caps.feature_flags & QCRATE_DMA_CAP_CAPTURE_CONFIG_ID)) {
+		fprintf(stderr,
+			"driver does not report captured configuration identity\n");
+		goto out;
+	}
 	if (options.words > SIZE_MAX / info.stream_word_bytes ||
 	    options.frames > SIZE_MAX /
 		((size_t)options.words * info.stream_word_bytes)) {
@@ -1336,16 +1402,25 @@ int main(int argc, char **argv)
 	}
 	emitter.socket_fd = socket_fd;
 	emitter.rate_bps = (uint64_t)options.rate_mbps * UINT64_C(1000000);
+	if (options.triggered_mode ||
+	    options.stream_mode == QCRATE_STREAM_MODE_DSP) {
+		if (qcrate_rpmsg_client_open(&rpmsg, options.rpmsg_device,
+					      (int)options.sequence_timeout_ms)) {
+			perror("R5 RPMsg endpoint open failed");
+			goto out;
+		}
+	}
+	if (options.stream_mode == QCRATE_STREAM_MODE_DSP &&
+	    load_active_dsp_profile(&rpmsg, &options, &config_id,
+				    &center_frequency_hz)) {
+		perror("active DSP profile query failed");
+		goto out;
+	}
 	if (options.triggered_mode) {
 		if (!(caps.feature_flags & QCRATE_DMA_CAP_BANK_POOL) ||
 		    !(caps.feature_flags & QCRATE_DMA_CAP_TRIGGERED)) {
 			fprintf(stderr,
 				"driver does not advertise triggered bank pools\n");
-			goto out;
-		}
-		if (qcrate_rpmsg_client_open(&rpmsg, options.rpmsg_device,
-					      (int)options.sequence_timeout_ms)) {
-			perror("R5 RPMsg endpoint open failed");
 			goto out;
 		}
 		sustained = (struct sustained_context) {
@@ -1355,6 +1430,8 @@ int main(int argc, char **argv)
 			.buffer_bytes = info.buffer_bytes,
 			.emitter = &emitter,
 			.rpmsg = &rpmsg,
+			.config_id = config_id,
+			.center_frequency_hz = center_frequency_hz,
 		};
 		sustained_status = run_sustained(&sustained);
 		sustained_errno = errno;
@@ -1399,8 +1476,16 @@ int main(int argc, char **argv)
 			capture.completed_frames, options.frames);
 		goto out;
 	}
+	if (options.stream_mode == QCRATE_STREAM_MODE_DSP &&
+	    capture.captured_config_id != config_id) {
+		fprintf(stderr,
+			"capture configuration changed: expected 0x%016" PRIx64
+			", captured 0x%016" PRIx64 "\n",
+			config_id, (uint64_t)capture.captured_config_id);
+		goto out;
+	}
 
-	fill_profile(&options, &profile);
+	fill_profile(&options, config_id, center_frequency_hz, &profile);
 	profile.end_of_stream = true;
 	packet_status = qcrate_data_packetize(
 		&profile, buffer, total_bytes, emit_udp, &emitter, &packet_result);
@@ -1432,6 +1517,7 @@ int main(int argc, char **argv)
 	printf("UDP pacing         : %u Mb/s%s\n", options.rate_mbps,
 	       options.rate_mbps ? "" : " (disabled)");
 	printf("DMA stall cycles   : %u\n", capture.stall_cycles);
+	printf("configuration ID   : 0x%016" PRIx64 "\n", config_id);
 	status = EXIT_SUCCESS;
 
 out:

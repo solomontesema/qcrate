@@ -145,6 +145,24 @@ marks, aggregate stream stalls, missed/skipped triggers, starvation, DMA
 errors, and sender CPU use. Its run and stream IDs must match QIDX before it is
 used.
 
+DP-6D adds a `stream` object containing the run-frozen DSP configuration ID
+and LO center frequency. These values must agree with STREAM_INFO and every
+QIDX shot record.
+
+### `experiment.resolved.json`
+
+DP-6D orchestration copies the exact validated resolved experiment profile
+into each run directory before acquisition begins. Its deterministic DSP ID
+must match STREAM_INFO and every COMPLETE shot. The full profile SHA-256 also
+binds acquisition geometry and sequence-image identity, while the 64-bit DSP
+ID binds the numerical contract and active DSP integers.
+
+This file does not weaken the recorder boundary: the C recorder still decides
+which measurements are COMPLETE using only the wire protocol and arrival
+evidence. Offline tools use the profile afterward to select the correct
+bit-exact model. A missing or mismatched profile means model provenance is
+unavailable; it never authorizes sample publication.
+
 ## Reader Rules
 
 1. Reject unknown magic, version, header size, record size, nonzero reserved

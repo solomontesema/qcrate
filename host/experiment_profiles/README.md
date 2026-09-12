@@ -190,3 +190,77 @@ Retuning is fail-closed: the sequence and stream engines must be idle, and a
 rejected or timed-out PL commit restores the previous stream geometry. Use
 `qcrate-control config-recover` to abandon a staged transaction explicitly;
 it never rolls back or modifies an already active configuration.
+
+## DP-6D end-to-end experiment
+
+DP-6D carries one resolved profile through the complete measurement path:
+
+```text
+resolved profile -> R5 validate/commit -> PL active configuration
+       |                                      |
+       |                              captured configuration ID
+       v                                      v
+durable run artifact <- recorder <- UDP STREAM_INFO <- DMA result
+       |
+       +-> ID-selected bit-exact model -> analyzer image
+```
+
+`qcrate_experiment.py` is the normal host orchestration command. It starts the
+independent recorder, verifies that the board's compiled sequence image has the
+profile's SHA-256, uses one SSH/sudo session to apply the profile and acquire
+shots, copies the exact resolved profile into the run, checks every published
+IQ word, and renders `measurement.png`. Recorder integrity remains the hard
+ingest boundary; plotting starts only after a complete run has passed.
+
+Build the host recorder once if it is not already present:
+
+```bash
+python3 host/data_plane/build_recorder.py
+```
+
+Run the 29 MHz LO experiment:
+
+```bash
+RUN=build/experiments/dp6d-lo29-$(date -u +%Y%m%dT%H%M%SZ)
+python3 host/experiment_profiles/qcrate_experiment.py \
+  --profile host/experiment_profiles/examples/resolved/lo_29mhz.resolved.json \
+  --board petalinux@192.168.1.93 \
+  --destination 192.168.1.92 \
+  --source 192.168.1.93 \
+  --output "$RUN" \
+  --shots 10 --banks 4 --rate-mbps 420 --gui
+```
+
+Without rebuilding the FPGA, firmware, or Linux image, repeat with the 28.5
+MHz LO profile:
+
+```bash
+RUN=build/experiments/dp6d-lo28_5-$(date -u +%Y%m%dT%H%M%SZ)
+python3 host/experiment_profiles/qcrate_experiment.py \
+  --profile host/experiment_profiles/examples/resolved/lo_28_5mhz.resolved.json \
+  --board petalinux@192.168.1.93 \
+  --destination 192.168.1.92 \
+  --source 192.168.1.93 \
+  --output "$RUN" \
+  --shots 10 --banks 4 --rate-mbps 420 --gui
+```
+
+The two runs must carry IDs `0x5db4fb578b27b09f` and
+`0xaf46287bb969ed24`, respectively. Their dominant baseband tones should be
+near 1.0 MHz and 1.5 MHz, and both commands must report zero bit-exact
+mismatches. Each generated run contains the profile, sender/recorder evidence,
+indexed samples, packet journal, and measurement image.
+
+### Target deployment for DP-6D
+
+The DMA ABI is now version 2. Rebuild and deploy one coherent image using the
+established PetaLinux flow; its dependency graph rebuilds the changed DMA
+driver, DMA tools, and streamer together:
+
+```bash
+python3 kv260/linux/petalinux/scripts/petalinux_flow.py all \
+  --device /dev/mmcblk0
+```
+
+No Vivado or Vitis rebuild is required because DP-6D consumes the capture-ID
+registers and R5 configuration-status API already accepted in DP-6B/DP-6C.

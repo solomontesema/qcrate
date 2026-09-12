@@ -197,3 +197,35 @@ int qcrate_rpmsg_client_exchange(
 	}
 	return 0;
 }
+
+int qcrate_rpmsg_get_runtime_config(
+	struct qcrate_rpmsg_client *client,
+	struct qcrate_runtime_config_status *status)
+{
+	struct qcrate_rpmsg_message response;
+
+	if (!status) {
+		errno = EINVAL;
+		return -1;
+	}
+	if (qcrate_rpmsg_client_exchange(client,
+		QCRATE_CMD_CONFIG_GET_STATUS, NULL, 0U, &response))
+		return -1;
+	if (response.payload_words != QCRATE_CONFIG_STATUS_WORDS) {
+		errno = EPROTO;
+		return -1;
+	}
+
+	status->flags = response.payload[0];
+	status->pl_status = response.payload[1];
+	status->pl_reject_reason = response.payload[2];
+	status->active_generation = response.payload[3];
+	status->config_id = (uint64_t)response.payload[4] |
+		((uint64_t)response.payload[5] << 32U);
+	status->signal_phase_increment = response.payload[6];
+	status->lo_phase_increment = response.payload[7];
+	status->frame_length_words = response.payload[8];
+	status->frame_count = response.payload[9];
+	status->reason = response.payload[10];
+	return 0;
+}

@@ -15,12 +15,13 @@ from pathlib import Path
 
 
 DEVICE = Path("/dev/qcrate-dma")
-ABI_VERSION = 1
+ABI_VERSION = 2
 DMA_TRANS_NOERROR = 0
 CAP_SG_CHAIN = 1 << 0
 CAP_DSP_MODE = 1 << 1
 CAP_TRIGGERED = 1 << 2
 CAP_BANK_POOL = 1 << 3
+CAP_CAPTURE_CONFIG_ID = 1 << 4
 
 POOL_START_TRIGGERED = 1 << 0
 POOL_RUNNING = 1 << 0
@@ -36,19 +37,22 @@ DSP_CONFIG = Path("/usr/share/qcrate/dsp/tone_1mhz.json")
 DSP_TABLE_DIR = Path("/usr/share/qcrate/dsp")
 
 INFO_STRUCT = struct.Struct("<8I")
-CAPTURE_STRUCT = struct.Struct("<16I")
+CAPTURE_STRUCT = struct.Struct("<12IQ2I")
 CAPS_STRUCT = struct.Struct("<8I")
-CAPTURE_FRAMES_STRUCT = struct.Struct("<16I")
+CAPTURE_FRAMES_STRUCT = struct.Struct("<12IQ2I")
 TRIGGERED_ARM_STRUCT = struct.Struct("<8I")
-TRIGGERED_RESULT_STRUCT = struct.Struct("<14I2Q6I")
+TRIGGERED_RESULT_STRUCT = struct.Struct("<14I3Q4I")
 POOL_START_STRUCT = struct.Struct("<8IQ6I")
-POOL_DEQUEUE_STRUCT = struct.Struct("<20I5Q2I")
+POOL_DEQUEUE_STRUCT = struct.Struct("<20I6Q")
 POOL_RELEASE_STRUCT = struct.Struct("<2I2Q2I")
 POOL_STATUS_STRUCT = struct.Struct("<16I8Q")
 POOL_STOP_STRUCT = struct.Struct("<4IQ2I")
 WORD_STRUCT = struct.Struct("<I")
 
 assert POOL_START_STRUCT.size == 64
+assert CAPTURE_STRUCT.size == 64
+assert CAPTURE_FRAMES_STRUCT.size == 64
+assert TRIGGERED_RESULT_STRUCT.size == 96
 assert POOL_DEQUEUE_STRUCT.size == 128
 assert POOL_RELEASE_STRUCT.size == 32
 assert POOL_STATUS_STRUCT.size == 128
@@ -132,6 +136,10 @@ class DeviceCaps:
     def has_bank_pool(self) -> bool:
         return bool(self.feature_flags & CAP_BANK_POOL)
 
+    @property
+    def has_capture_config_id(self) -> bool:
+        return bool(self.feature_flags & CAP_CAPTURE_CONFIG_ID)
+
 
 @dataclass(frozen=True)
 class CaptureResult:
@@ -145,6 +153,7 @@ class CaptureResult:
     current_frame_id: int
     current_sample_index: int
     stall_cycles: int
+    captured_config_id: int
 
 
 @dataclass(frozen=True)
@@ -160,6 +169,7 @@ class CaptureFramesResult:
     current_frame_id: int
     current_sample_index: int
     stall_cycles: int
+    captured_config_id: int
 
 
 @dataclass(frozen=True)
@@ -179,6 +189,7 @@ class TriggeredResult:
     timestamp_flags: int
     trigger_time: int
     first_sample_time: int
+    captured_config_id: int
 
 
 @dataclass(frozen=True)
@@ -220,6 +231,7 @@ class PoolBank:
     trigger_time: int
     first_sample_time: int
     completion_mono_ns: int
+    captured_config_id: int
 
 
 @dataclass(frozen=True)
@@ -286,26 +298,28 @@ def get_caps(fd: int) -> DeviceCaps:
 def request_capture(
     fd: int, words: int, timeout_ms: int, stream_mode: int = 0
 ) -> CaptureResult:
-    values = [0] * 16
+    values = [0] * 15
     values[0] = words
     values[1] = timeout_ms
     values[10] = stream_mode
     raw = bytearray(CAPTURE_STRUCT.pack(*values))
     fcntl.ioctl(fd, IOC_CAPTURE, raw, True)
-    return CaptureResult(*CAPTURE_STRUCT.unpack(raw)[:10])
+    unpacked = CAPTURE_STRUCT.unpack(raw)
+    return CaptureResult(*unpacked[:10], unpacked[12])
 
 
 def request_capture_frames(
     fd: int, words: int, frames: int, timeout_ms: int, stream_mode: int = 0
 ) -> CaptureFramesResult:
-    values = [0] * 16
+    values = [0] * 15
     values[0] = words
     values[1] = frames
     values[2] = timeout_ms
     values[11] = stream_mode
     raw = bytearray(CAPTURE_FRAMES_STRUCT.pack(*values))
     fcntl.ioctl(fd, IOC_CAPTURE_FRAMES, raw, True)
-    return CaptureFramesResult(*CAPTURE_FRAMES_STRUCT.unpack(raw)[:11])
+    unpacked = CAPTURE_FRAMES_STRUCT.unpack(raw)
+    return CaptureFramesResult(*unpacked[:11], unpacked[12])
 
 
 def arm_triggered(
@@ -319,12 +333,14 @@ def arm_triggered(
 
 
 def wait_triggered(fd: int, timeout_ms: int) -> TriggeredResult:
-    values = [0] * 22
+    values = [0] * 21
     values[0] = timeout_ms
     raw = bytearray(TRIGGERED_RESULT_STRUCT.pack(*values))
     fcntl.ioctl(fd, IOC_WAIT_TRIGGERED, raw, True)
     unpacked = TRIGGERED_RESULT_STRUCT.unpack(raw)
-    return TriggeredResult(*unpacked[:13], unpacked[14], unpacked[15])
+    return TriggeredResult(
+        *unpacked[:13], unpacked[14], unpacked[15], unpacked[16]
+    )
 
 
 def cancel_triggered(fd: int) -> None:
@@ -361,11 +377,11 @@ def start_pool(
 
 
 def dequeue_pool(fd: int, timeout_ms: int) -> PoolBank:
-    values = [0] * 27
+    values = [0] * 26
     values[0] = timeout_ms
     raw = bytearray(POOL_DEQUEUE_STRUCT.pack(*values))
     fcntl.ioctl(fd, IOC_POOL_DEQUEUE, raw, True)
-    return PoolBank(*POOL_DEQUEUE_STRUCT.unpack(raw)[:25])
+    return PoolBank(*POOL_DEQUEUE_STRUCT.unpack(raw))
 
 
 def release_pool(fd: int, bank: PoolBank) -> None:
@@ -460,6 +476,10 @@ def print_info(info: DeviceInfo, caps: DeviceCaps) -> None:
         f"{'yes' if caps.has_triggered_capture else 'no'}"
     )
     print(f"finite bank pool   : {'yes' if caps.has_bank_pool else 'no'}")
+    print(
+        "capture config ID  : "
+        f"{'yes' if caps.has_capture_config_id else 'no'}"
+    )
     if info.max_frame_words < 4096:
         print("NOTE: the current 14-bit AXI DMA length field limits frames to 4095 words")
 

@@ -215,9 +215,9 @@ not silently change acquisition timing. The PL rejects data production until
 the stream engine is armed. Triggers seen while not armed are counted and do
 not start a transfer.
 
-The canonical UAPI remains ABI version 1 because the existing structures and
-ioctls are unchanged. `QCRATE_DMA_CAP_TRIGGERED` advertises three additional
-operations:
+The triggered operations were originally added without changing ABI v1
+structure sizes. The current DP-6D UAPI is ABI v2, as described below.
+`QCRATE_DMA_CAP_TRIGGERED` advertises three operations:
 
 | Operation | Ownership transition |
 | --- | --- |
@@ -281,10 +281,16 @@ The additive ABI operations are:
 | `POOL_STATUS` | Report ownership counts, run identity, queue high-water, produced/consumed bytes and banks, starvation, skipped triggers, and errors |
 | `POOL_STOP` | Stop rearming, drain an issued finite transaction, discard `READY` banks, and preserve `USER_OWNED` banks until release or close |
 
-The ABI version remains one because all existing layouts and operation numbers
-are unchanged. `QCRATE_DMA_CAP_BANK_POOL` advertises the extension. New layouts
-use fixed-width fields, explicit reserved space, and compile-time size checks;
-the canonical definitions remain in `common/dma/qcrate_dma_uapi.h`.
+`QCRATE_DMA_CAP_BANK_POOL` advertises the extension. Layouts use fixed-width
+fields, explicit reserved space, and compile-time size checks; the canonical
+definitions remain in `common/dma/qcrate_dma_uapi.h`.
+
+DP-6D advances the UAPI to ABI v2 by consuming reserved fields, without
+changing any structure size or ioctl command number. Every completed finite,
+triggered, and pool-bank result now includes the 64-bit DSP configuration ID
+latched by PL at capture start. `QCRATE_DMA_CAP_CAPTURE_CONFIG_ID` advertises
+this evidence. The version bump makes mixed old/new driver and userspace
+deployments fail explicitly instead of silently treating a missing ID as zero.
 
 No-free-bank behavior is deliberate backpressure at the acquisition boundary,
 not an overrun. The driver sets `STARVED`, increments `starvation_events`, and

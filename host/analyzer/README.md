@@ -47,8 +47,8 @@ The application provides:
   centered complex spectrum;
 - dominant tone, level, peak/RMS magnitude, CRC, packet interval, duplicate
   and reorder counts, and configuration identity;
-- exact comparison against the tracked DSP model when the run's `config_id`
-  identifies the canonical 1 MHz Q-Crate profile;
+- exact comparison against the matching bundled resolved profile, selected by
+  the hardware-captured `config_id`, with legacy fallback for v1.0.0 runs;
 - one-second append-only refresh while a recorder is still committing QIDX
   records.
 
@@ -91,6 +91,12 @@ The instrument-health panel is derived from committed QIDX records during a
 run. Recorder CPU, exact UDP throughput, and sender DMA/queue metrics appear
 after the atomic `run.json` and `sender.json` reports arrive. Their temporary
 absence is displayed as pending rather than guessed.
+
+DP-6D recordings contain `experiment.resolved.json`. Before using it, the
+analyzer recomputes both deterministic identities, checks the active integer
+bundle against the requested physical values, and requires its DSP ID to match
+the selected QIDX shot. A malformed profile is an analysis error; an unknown
+ID is shown without claiming a bit-exact comparison.
 
 ## Setup
 
