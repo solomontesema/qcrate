@@ -51,6 +51,50 @@ command when it is run, record the tool version, and state its observed output
 or success condition. This keeps the document usable as a reproducible build
 record rather than a collection of unverified snippets.
 
+## Unattended instrument access
+
+Large runtime-configuration sweeps must not require an SSH password and a
+`sudo` password for every measurement point. Q-Crate solves these as two
+separate access-control concerns:
+
+- the host uses an SSH key for login;
+- the target grants the `petalinux` operator access to instrument device nodes
+  through the dedicated `qcrate` group.
+
+The `qcrate-access` recipe installs a udev policy for `/dev/qcrate-dma` and the
+`qcrate-control` RPMsg endpoint. `petalinuxbsp.conf` creates the system group
+and adds the operator to it. It does not install a passwordless `sudo` rule and
+does not grant general root access. A new login after deployment is required
+before supplementary group membership becomes active.
+
+Build this small recipe first to diagnose recipe or packaging errors before a
+full image build:
+
+```bash
+cd /tools/fpga_projects/qcrate/kv260/linux/petalinux/qcrate-kv260
+source /tools/Xilinx/PetaLinux/2024.2/settings.sh
+petalinux-build -c qcrate-access
+```
+
+After packaging and deploying the complete image through the normal flow,
+verify the policy on the board:
+
+```bash
+id
+stat -c '%A %U %G %n' /dev/qcrate-dma /dev/rpmsg*
+qcrate-control config-status
+```
+
+The operator should list `qcrate` among its groups, the Q-Crate device nodes
+should be `root:qcrate` with group read/write permission, and configuration
+status should work without `sudo`.
+
+The same group and udev policy was applied temporarily to the accepted KV260
+image on 12 September 2026. SSH-key login, `qcrate-dma info`, configuration
+status, and a complete unattended experiment all passed without an SSH or
+`sudo` password prompt. The tracked recipe makes that validated policy
+persistent in the next generated image.
+
 ## Step 0: project origin and source boundary
 
 `qcrate-kv260/project-spec/` was created once when the downloaded KV260 SDT BSP

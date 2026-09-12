@@ -582,6 +582,8 @@ def _preserve_interrupted(path: Path) -> Path:
 def run_sweep(args: argparse.Namespace) -> int:
     root = args.output.resolve()
     spec = args.spec.resolve()
+    if not args.interactive_auth:
+        experiment.verify_unattended_access(args.board)
     if not (root / "sweep-plan.json").exists():
         plan = prepare_plan(spec, root)
     else:
@@ -622,6 +624,7 @@ def run_sweep(args: argparse.Namespace) -> int:
             startup_timeout_seconds=args.startup_timeout_seconds,
             snapshot=run_path / "measurement.png",
             gui=False,
+            unattended=not args.interactive_auth,
         )
         print(f"\n== DP-6E point {point['ordinal'] + 1}/{len(plan['points'])}: {point['label']} ==")
         experiment.run_experiment(point_args)
@@ -653,6 +656,10 @@ def parse_args() -> argparse.Namespace:
     run.add_argument("--startup-timeout-seconds", type=int, default=30)
     run.add_argument("--shots", type=int, default=10)
     run.add_argument("--resume", action="store_true")
+    run.add_argument(
+        "--interactive-auth", action="store_true",
+        help="use legacy SSH and sudo password prompts instead of unattended access",
+    )
     args = parser.parse_args()
     if args.command == "run":
         args.bind = args.bind or args.destination

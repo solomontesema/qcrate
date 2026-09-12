@@ -41,6 +41,20 @@ class ExperimentCommandTests(unittest.TestCase):
         command = profile.configuration_command(resolved, "qcrate-control")
         self.assertEqual(shlex.split(shlex.join(command)), command)
 
+    def test_unattended_ssh_is_noninteractive_and_unprivileged(self) -> None:
+        args = argparse.Namespace(board="petalinux@192.0.2.20", unattended=True)
+        command = experiment.ssh_target_command(args, "qcrate-control config-status")
+        self.assertIn("BatchMode=yes", command)
+        self.assertIn("ControlMaster=auto", command)
+        self.assertIn("-T", command)
+        self.assertNotIn("sudo", shlex.join(command))
+
+    def test_legacy_ssh_retains_interactive_sudo_fallback(self) -> None:
+        args = argparse.Namespace(board="petalinux@192.0.2.20", unattended=False)
+        command = experiment.ssh_target_command(args, "qcrate-control config-status")
+        self.assertIn("-tt", command)
+        self.assertIn("sudo", command[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

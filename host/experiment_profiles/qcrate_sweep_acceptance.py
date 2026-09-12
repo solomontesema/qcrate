@@ -117,12 +117,9 @@ def run_target_faults(
     alternate: dict[str, Any],
 ) -> tuple[dict[str, Any], int]:
     script = target_fault_script(active, alternate, args.sequence)
-    sudo_command = shlex.join([
-        "sudo", "-p", "[KV260 sudo] password: ", "--", "sh", "-c", script,
-    ])
     log = root / "fault-evidence" / "target-semantics.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    result = experiment.run_visible(["ssh", "-tt", args.board, sudo_command], log)
+    result = experiment.run_visible(experiment.ssh_target_command(args, script), log)
     transcript = result.stdout.decode("utf-8", errors="replace")
     cases = {
         "invalid_profile_rejection": {
@@ -202,6 +199,7 @@ def run_recovery_faults(
         startup_timeout_seconds=args.startup_timeout_seconds,
         snapshot=recovery_run / "measurement.png",
         gui=False,
+        unattended=args.unattended,
     )
     experiment.run_experiment(recovery_args)
     active = profile_contract.load_resolved_profile(active_path)
@@ -268,6 +266,8 @@ def finalize_acceptance(root: Path, faults: dict[str, Any]) -> dict[str, Any]:
 
 def run_acceptance(args: argparse.Namespace) -> int:
     root = args.sweep.resolve()
+    if args.unattended:
+        experiment.verify_unattended_access(args.board)
     plan = sweep.load_plan(root)
     active_point = plan["points"][-1]
     alternate_point = plan["points"][0]
@@ -314,8 +314,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sequence", default=experiment.DEFAULT_SEQUENCE)
     parser.add_argument("--recorder", type=Path, default=experiment.DEFAULT_RECORDER)
     parser.add_argument("--startup-timeout-seconds", type=int, default=30)
+    parser.add_argument(
+        "--interactive-auth", action="store_true",
+        help="use legacy SSH and sudo password prompts instead of unattended access",
+    )
     args = parser.parse_args()
     args.bind = args.bind or args.destination
+    args.unattended = not args.interactive_auth
     if not 1 <= args.port <= 65535 or not 2 <= args.banks <= 64:
         parser.error("port or banks are outside their supported range")
     if args.rate_mbps < 0 or args.startup_timeout_seconds < 1:

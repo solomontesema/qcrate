@@ -33,6 +33,14 @@ from qcrate_run import RunBundle  # noqa: E402
 
 DEFAULT_RECORDER = ROOT / "build" / "host" / "qcrate-recorder"
 DEFAULT_SEQUENCE = "/home/petalinux/qcrate/two_channel_demo.qseq"
+SSH_BATCH_OPTIONS = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectionAttempts=1",
+    "-o", "ConnectTimeout=10",
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPersist=60",
+    "-o", "ControlPath=~/.ssh/qcrate-%C",
+]
 
 
 def atomic_copy(source: Path, destination: Path) -> None:
@@ -95,6 +103,40 @@ def run_visible(command: list[str], log_path: Path) -> subprocess.CompletedProce
             process.wait(timeout=5)
             raise
     return subprocess.CompletedProcess(command, process.wait(), bytes(captured), None)
+
+
+def ssh_target_command(args: argparse.Namespace, script: str) -> list[str]:
+    """Build either a direct unattended or legacy interactive target command."""
+    if getattr(args, "unattended", False):
+        remote = shlex.join(["sh", "-c", script])
+        return ["ssh", *SSH_BATCH_OPTIONS, "-T", args.board, remote]
+    remote = shlex.join([
+        "sudo", "-p", "[KV260 sudo] password: ", "--", "sh", "-c", script,
+    ])
+    return ["ssh", "-tt", args.board, remote]
+
+
+def verify_unattended_access(board: str) -> None:
+    """Fail before acquisition unless SSH keys and Q-Crate device ACLs work."""
+    probe = (
+        "test -r /dev/qcrate-dma && test -w /dev/qcrate-dma && "
+        "qcrate-control config-status >/dev/null"
+    )
+    result = subprocess.run(
+        ["ssh", *SSH_BATCH_OPTIONS, "-T", board, probe],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode:
+        detail = result.stderr.strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
+        raise RuntimeError(
+            "unattended KV260 access failed; install the host SSH key and deploy "
+            "the qcrate-access device-group policy, or use --interactive-auth"
+            f"{suffix}"
+        )
 
 
 def extract_report(payload: bytes, begin: str, end: str) -> dict[str, Any]:
@@ -225,11 +267,8 @@ def run_experiment(args: argparse.Namespace) -> int:
         begin = f"__QCRATE_REPORT_{token}_BEGIN__"
         end = f"__QCRATE_REPORT_{token}_END__"
         script = remote_workload(resolved, args, remote_report, begin, end)
-        sudo_command = shlex.join([
-            "sudo", "-p", "[KV260 sudo] password: ", "--", "sh", "-c", script,
-        ])
         sender_result = run_visible(
-            ["ssh", "-tt", args.board, sudo_command], sender_log
+            ssh_target_command(args, script), sender_log
         )
         report = extract_report(sender_result.stdout, begin, end)
         atomic_json(output / "sender.json", report)
@@ -288,6 +327,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--startup-timeout-seconds", type=int, default=30)
     parser.add_argument("--snapshot", type=Path)
     parser.add_argument("--gui", action="store_true", help="open the accepted run after verification")
+    parser.add_argument(
+        "--unattended", action="store_true",
+        help="require SSH-key and direct Q-Crate device access; never prompt",
+    )
     args = parser.parse_args()
     args.bind = args.bind or args.destination
     if not 1 <= args.port <= 65535 or args.shots < 1 or not 2 <= args.banks <= 64:

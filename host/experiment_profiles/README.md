@@ -337,10 +337,34 @@ python3 host/experiment_profiles/qcrate_sweep.py run \
   --shots 10 --banks 4 --rate-mbps 420
 ```
 
-The command starts and closes the independent recorder once per point. SSH key
-authentication is recommended for unattended sweeps. Unless target device
-permissions or a narrowly scoped sudo policy have been configured, `sudo` may
-still request the target password for each independent experiment.
+The command starts and closes the independent recorder once per point. Sweep
+execution defaults to unattended access and fails before point one unless both
+SSH-key authentication and the Q-Crate target device policy are active. It
+never collects, stores, or forwards either password. OpenSSH multiplexing
+reuses the authenticated transport while retaining a separate command and
+recording boundary for every sweep point.
+
+Configure the host key once:
+
+```bash
+test -f "$HOME/.ssh/id_ed25519" || ssh-keygen -t ed25519
+ssh-copy-id petalinux@192.168.1.93
+ssh -o BatchMode=yes petalinux@192.168.1.93 true
+```
+
+The PetaLinux image installs `qcrate-access`, creates a dedicated `qcrate`
+group, adds the `petalinux` operator to it, and grants that group `0660` access
+only to `/dev/qcrate-dma` and the `qcrate-control` RPMsg endpoint. Q-Crate
+acquisition therefore needs neither root nor a passwordless shell. After
+deploying an image containing this policy, verify it from a new login:
+
+```bash
+ssh petalinux@192.168.1.93 'id; stat -c "%A %U %G %n" /dev/qcrate-dma /dev/rpmsg*; qcrate-control config-status'
+```
+
+For an older image, append `--interactive-auth` to `qcrate_sweep.py run` and
+`qcrate_sweep_acceptance.py`. This retains the prior SSH and `sudo` prompts but
+is intentionally unsuitable for a large unattended sweep.
 
 If execution is interrupted, rerun the same command with `--resume`. Already
 verified points are skipped. An incomplete or invalid point directory is
