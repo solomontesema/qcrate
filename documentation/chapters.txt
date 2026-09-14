@@ -1,0 +1,9 @@
+# PDF reading order, relative to documentation/. One source per line.
+chapters/01-preface.md
+chapters/02-introduction.md
+chapters/03-system-architecture.md
+chapters/04-signal-processing.md
+chapters/05-fpga-implementation.md
+chapters/06-firmware-software.md
+chapters/07-glossary.md
+chapters/08-references.md

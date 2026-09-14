@@ -1,0 +1,40 @@
+title: "Q-Crate Design Guide"
+subtitle: "Architecture, Digital Signal Processing, FPGA, and Firmware"
+author: "Solomon Tesema"
+date: "Version 0.2-draft - September 2026"
+lang: en-GB
+documentclass: report
+classoption:
+  - oneside
+papersize: a4
+fontsize: 11pt
+geometry:
+  - top=24mm
+  - bottom=24mm
+  - left=26mm
+  - right=26mm
+colorlinks: true
+linkcolor: MidnightBlue
+urlcolor: MidnightBlue
+toc: true
+toc-depth: 3
+numbersections: true
+header-includes:
+  - |
+    ```{=latex}
+    \usepackage{fancyhdr}
+    \usepackage{xcolor}
+    \usepackage{booktabs}
+    \definecolor{qblue}{HTML}{173B57}
+    \pagestyle{fancy}
+    \fancyhf{}
+    \fancyhead[L]{\small Q-Crate Design Guide}
+    \fancyhead[R]{\small Version 0.2-draft}
+    \fancyfoot[C]{\thepage}
+    \setlength{\headheight}{14pt}
+    ```
+  - \usepackage{fvextra}
+  - \DefineVerbatimEnvironment{Highlighting}{Verbatim}{commandchars=\\\{\},fontsize=\scriptsize,breaklines=true}
+  - \usepackage{tocloft}
+  - \setlength{\cftsecnumwidth}{3em}
+  - \setlength{\cftsubsecnumwidth}{4em}

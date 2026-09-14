@@ -133,7 +133,7 @@ milestone.
 
 | Start here | Contents |
 |---|---|
-| [Q-Crate Design Guide](documentation/Q-CRATE_DESIGN_GUIDE.md) | Architecture and DSP concepts; document edition 0.1 |
+| [Q-Crate Design Guide](documentation/Q-CRATE_DESIGN_GUIDE.md) | Chapter-based architecture, DSP and software guide; 0.2 working draft |
 | [KV260 platform](kv260/README.md) | Hardware/software ownership, clocks, and deployment stages |
 | [KV260 hardware](kv260/hw/README.md) | Block design, RTL tests, sequencing, reset, and ILA |
 | [PetaLinux platform](kv260/linux/petalinux/README.md) | Fixed-platform configuration, build, packaging, SD deployment, and first boot |
