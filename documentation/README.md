@@ -2,11 +2,6 @@
 
 [Read the Design Guide](Q-CRATE_DESIGN_GUIDE.md).
 
-The [agreed editorial plan](EDITORIAL_PLAN.md) defines the eleven-chapter
-destination, chapter boundaries, source-to-chapter map and writing sequence.
-The current eight-file draft remains the PDF source until the planned audit
-and reorganisation. The editorial plan itself is not included in the book.
-
 The canonical book sources are the individual files in `chapters/`.
 `chapters.txt` explicitly defines their reading order; `metadata.yaml` contains
 the title, document revision and PDF layout. The former monolithic guide is now
